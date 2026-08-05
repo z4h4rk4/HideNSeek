@@ -18,6 +18,11 @@ type PlannedRoute = {
 	sectorId: string,
 }
 
+type DestinationReservation = {
+	position: Vector3,
+	sectorId: string,
+}
+
 export type Controller = {
 	npc: Model,
 	humanoid: Humanoid,
@@ -41,9 +46,13 @@ export type Controller = {
 	lastProgressAt: number,
 	lastMoveDirection: Vector3,
 	nextDoorPushAt: number,
+	doorInteractionStartedAt: number,
 }
 
 local HiderBrain = {}
+local currentReservations: {[Model]: DestinationReservation} = {}
+local pendingReservations: {[Model]: DestinationReservation} = {}
+local controllerSerial = 0
 
 local function planarDistance(left: Vector3, right: Vector3): number
 	return Vector2.new(left.X - right.X, left.Z - right.Z).Magnitude
@@ -55,6 +64,7 @@ local function horizontalUnit(vector: Vector3): Vector3?
 end
 
 local function clearRoute(controller: Controller)
+	currentReservations[controller.npc] = nil
 	controller.route = {}
 	controller.routeIndex = 1
 	controller.destination = nil
@@ -63,11 +73,48 @@ local function clearRoute(controller: Controller)
 	controller.waypointPlaneDistance = 0
 	controller.bestWaypointDistance = math.huge
 	controller.nextDoorPushAt = 0
+	controller.doorInteractionStartedAt = 0
+	controller.npc:SetAttribute("AITargetSector", "")
+	controller.npc:SetAttribute("AITargetPosition", nil)
 end
 
 local function clearPendingRoute(controller: Controller)
+	pendingReservations[controller.npc] = nil
 	controller.pendingRoute = nil
 	controller.npc:SetAttribute("AIPrefetchedRoute", false)
+end
+
+local function reservationPenaltyFor(
+	candidate: HiderMapGeometry.Destination,
+	reservation: DestinationReservation?
+): number
+	if not reservation then
+		return 0
+	end
+	local penalty = if reservation.sectorId == candidate.sectorId
+		then HiderConfig.TARGET_RESERVATION_SECTOR_PENALTY
+		else 0
+	local distance = planarDistance(candidate.position, reservation.position)
+	local proximity = math.max(0, 1 - distance / HiderConfig.TARGET_RESERVATION_RADIUS)
+	return penalty + proximity * HiderConfig.TARGET_RESERVATION_PROXIMITY_PENALTY
+end
+
+local function getReservationPenalty(
+	controller: Controller,
+	candidate: HiderMapGeometry.Destination
+): number
+	local penalty = 0
+	for npc, reservation in pairs(currentReservations) do
+		if npc ~= controller.npc and npc.Parent then
+			penalty += reservationPenaltyFor(candidate, reservation)
+		end
+	end
+	for npc, reservation in pairs(pendingReservations) do
+		if npc ~= controller.npc and npc.Parent then
+			penalty += reservationPenaltyFor(candidate, reservation)
+		end
+	end
+	return penalty
 end
 
 local function setNavigationStatus(controller: Controller, status: string)
@@ -140,11 +187,13 @@ local function scoreCandidate(
 	end
 	local shortTargetPenalty = math.max(0, HiderConfig.WANDER_MIN_TARGET_DISTANCE - distance)
 		* HiderConfig.WANDER_SHORT_TARGET_PENALTY
+	local reservationPenalty = getReservationPenalty(controller, candidate)
 	return explorationBonus
 		+ math.min(distance, HiderConfig.WANDER_DISTANCE_SCORE_CAP)
 		+ turnScore
 		+ controller.random:NextNumber(0, HiderConfig.WANDER_SCORE_RANDOMNESS)
 		- shortTargetPenalty
+		- reservationPenalty
 end
 
 local function collectChoices(
@@ -263,6 +312,10 @@ local function startPlannedRoute(controller: Controller, planned: PlannedRoute, 
 	end
 	controller.destination = planned.destination
 	controller.destinationSector = planned.sectorId
+	currentReservations[controller.npc] = {
+		position = planned.destination,
+		sectorId = planned.sectorId,
+	}
 	controller.sectorVisits[planned.sectorId] = now
 	controller.npc:SetAttribute("AITargetSector", planned.sectorId)
 	controller.npc:SetAttribute("AITargetPosition", planned.destination)
@@ -309,6 +362,10 @@ local function prefetchRoute(controller: Controller, now: number)
 	controller.nextPrefetchRetryAt = now + HiderConfig.PREFETCH_RETRY_SECONDS
 	if planned then
 		controller.pendingRoute = planned
+		pendingReservations[controller.npc] = {
+			position = planned.destination,
+			sectorId = planned.sectorId,
+		}
 		controller.npc:SetAttribute("AIPrefetchedRoute", true)
 	end
 end
@@ -347,6 +404,10 @@ function HiderBrain.New(npc: Model): Controller?
 	if not humanoid or humanoid.Health <= 0 or not rootPart or not rootPart:IsA("BasePart") then
 		return nil
 	end
+	controllerSerial += 1
+	local navigationSeed = math.floor(os.clock() * 1000000 + controllerSerial * 104729)
+		% 2147483647
+	navigationSeed = math.max(1, navigationSeed)
 	npc:SetAttribute("AIState", "Idle")
 	npc:SetAttribute("AINavigationStatus", "Idle")
 	npc:SetAttribute("AIStallReason", "")
@@ -360,11 +421,12 @@ function HiderBrain.New(npc: Model): Controller?
 	npc:SetAttribute("AITargetSector", "")
 	npc:SetAttribute("AIDoorPushCount", 0)
 	npc:SetAttribute("AILastDoorPart", "")
+	npc:SetAttribute("AINavigationSeed", navigationSeed)
 	return {
 		npc = npc,
 		humanoid = humanoid,
 		rootPart = rootPart,
-		random = Random.new(),
+		random = Random.new(navigationSeed),
 		running = true,
 		active = false,
 		geometry = nil,
@@ -383,6 +445,7 @@ function HiderBrain.New(npc: Model): Controller?
 		lastProgressAt = os.clock(),
 		lastMoveDirection = Vector3.zero,
 		nextDoorPushAt = 0,
+		doorInteractionStartedAt = 0,
 	}
 end
 
@@ -398,9 +461,10 @@ function HiderBrain.SetActive(controller: Controller, active: boolean)
 	controller.nextPrefetchRetryAt = 0
 	if active then
 		controller.npc:SetAttribute("AIState", "Wander")
-		if not planAndStart(controller, os.clock()) then
-			controller.humanoid:Move(Vector3.zero, false)
-		end
+		controller.nextRouteRetryAt = os.clock()
+			+ controller.random:NextNumber(0, HiderConfig.START_STAGGER_MAX_SECONDS)
+		setNavigationStatus(controller, "Searching")
+		controller.humanoid:Move(Vector3.zero, false)
 	else
 		controller.humanoid:Move(Vector3.zero, false)
 		controller.npc:SetAttribute("AIState", "Idle")
@@ -458,6 +522,7 @@ function HiderBrain.Step(controller: Controller)
 	if waypointDistance <= controller.bestWaypointDistance - HiderConfig.PROGRESS_EPSILON then
 		controller.bestWaypointDistance = waypointDistance
 		controller.lastProgressAt = now
+		controller.doorInteractionStartedAt = 0
 	else
 		local stalledFor = now - controller.lastProgressAt
 		if direction
@@ -470,6 +535,17 @@ function HiderBrain.Step(controller: Controller)
 				direction
 			)
 			if pushedDoor then
+				if controller.doorInteractionStartedAt <= 0 then
+					controller.doorInteractionStartedAt = now
+				end
+				if now - controller.doorInteractionStartedAt
+					<= HiderConfig.DOOR_INTERACTION_MAX_SECONDS then
+					-- Do not replace the route while a real moving leaf is being
+					-- pushed. A permanently jammed door still falls through to the
+					-- regular stall recovery after this bounded grace period.
+					controller.lastProgressAt = now
+					stalledFor = 0
+				end
 				local pushCount = controller.npc:GetAttribute("AIDoorPushCount")
 				controller.npc:SetAttribute(
 					"AIDoorPushCount",

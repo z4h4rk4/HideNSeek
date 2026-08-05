@@ -16,7 +16,7 @@ local ROUND_ROLE_ATTRIBUTE = "RoundRole"
 local ROLE_HIDER = "Hider"
 local ROLE_SEEKER = "Seeker"
 local PHASE_ROUND = "Round"
-local CHARACTER_COLLISION_GROUP = "Characters"
+local SEARCH_RAYCAST_COLLISION_GROUP = Config.RAYCAST_COLLISION_GROUP
 local WALLS_CONTAINER_NAME = "Walls"
 
 export type Callbacks = {
@@ -188,7 +188,7 @@ local function makeLineOfSightParameters(): RaycastParams
 	parameters.FilterDescendantsInstances = excluded
 	parameters.IgnoreWater = true
 	parameters.RespectCanCollide = true
-	parameters.CollisionGroup = CHARACTER_COLLISION_GROUP
+	parameters.CollisionGroup = SEARCH_RAYCAST_COLLISION_GROUP
 	return parameters
 end
 
@@ -214,7 +214,7 @@ local function makeWallLineOfSightParameters(geometry: ArenaGeometry): RaycastPa
 	parameters.FilterDescendantsInstances = wallParts
 	parameters.IgnoreWater = true
 	parameters.RespectCanCollide = false
-	parameters.CollisionGroup = CHARACTER_COLLISION_GROUP
+	parameters.CollisionGroup = SEARCH_RAYCAST_COLLISION_GROUP
 	return parameters
 end
 

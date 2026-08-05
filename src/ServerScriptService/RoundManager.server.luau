@@ -1,7 +1,6 @@
 --!strict
 
 local Players = game:GetService("Players")
-local PhysicsService = game:GetService("PhysicsService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local StarterPlayer = game:GetService("StarterPlayer")
@@ -10,6 +9,7 @@ local Workspace = game:GetService("Workspace")
 
 local roundModules = script.Parent:WaitForChild("Round")
 local RoundConfig = require(roundModules:WaitForChild("RoundConfig"))
+local DoorCharacterCollider = require(roundModules:WaitForChild("DoorCharacterCollider"))
 local SeekerSearchConfig = require(ReplicatedStorage:WaitForChild("SeekerSearchConfig"))
 local HiderService = require(roundModules:WaitForChild("HiderService"))
 local RoundCharacterState = require(roundModules:WaitForChild("RoundCharacterState"))
@@ -24,9 +24,6 @@ local STARTER_CHARACTER_NAME = "StarterCharacter"
 local HUB_CONTAINER_NAME = "HUB"
 local HUB_SPAWN_NAME = "SpawnHUB"
 local ARENA_SPAWN_NAME = "SpawnArena"
-local CHARACTER_COLLISION_GROUP = "Characters"
-local NPC_COLLISION_GROUP = "RoundNPCs"
-local DOOR_COLLISION_GROUP = "Doors"
 
 local STARTING_DURATION_SECONDS = RoundConfig.STARTING_DURATION_SECONDS
 local ROUND_DURATION_SECONDS = RoundConfig.ROUND_DURATION_SECONDS
@@ -84,19 +81,7 @@ local SPAWN_SLOT_COORDINATES = table.freeze({
 	Vector2.new(1, 1),
 })
 
-pcall(function()
-	PhysicsService:RegisterCollisionGroup(CHARACTER_COLLISION_GROUP)
-end)
-pcall(function()
-	PhysicsService:RegisterCollisionGroup(NPC_COLLISION_GROUP)
-end)
-pcall(function()
-	PhysicsService:RegisterCollisionGroup(DOOR_COLLISION_GROUP)
-end)
-PhysicsService:CollisionGroupSetCollidable(NPC_COLLISION_GROUP, NPC_COLLISION_GROUP, false)
-PhysicsService:CollisionGroupSetCollidable(NPC_COLLISION_GROUP, CHARACTER_COLLISION_GROUP, false)
-PhysicsService:CollisionGroupSetCollidable(NPC_COLLISION_GROUP, "Default", true)
-PhysicsService:CollisionGroupSetCollidable(NPC_COLLISION_GROUP, DOOR_COLLISION_GROUP, true)
+DoorCharacterCollider.Configure()
 
 local function getOrCreateTeam(name: string, color: BrickColor): Team
 	local existing = Teams:FindFirstChild(name)
@@ -511,6 +496,12 @@ local function applyCharacterRoleScale(character: Model, role: string)
 			rootPart.AssemblyAngularVelocity = Vector3.zero
 		end
 	end
+	DoorCharacterCollider.Refresh(
+		character,
+		if character:GetAttribute(MANAGED_NPC_ATTRIBUTE) == true
+			then DoorCharacterCollider.NPC_COLLISION_GROUP
+			else DoorCharacterCollider.CHARACTER_COLLISION_GROUP
+	)
 end
 
 local function applyPlayerRoleScale(player: Player)
@@ -752,9 +743,6 @@ local function spawnNpc(role: string): boolean
 			end
 			descendant.AssemblyLinearVelocity = Vector3.zero
 			descendant.AssemblyAngularVelocity = Vector3.zero
-			pcall(function()
-				descendant.CollisionGroup = NPC_COLLISION_GROUP
-			end)
 		end
 	end
 

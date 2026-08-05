@@ -20,6 +20,14 @@ return table.freeze({
 	MAX_SEEKERS = 2,
 	WALK_SPEED = 10,
 	SEEKER_SCALE_MULTIPLIER = 1.5,
+	DOOR_COLLIDER = table.freeze({
+		-- Preserve each role's real width, but replace the animated multi-part
+		-- contact with one slightly inset, smooth vertical cylinder.
+		DIAMETER_MULTIPLIER = 0.9,
+		HEIGHT_MULTIPLIER = 1,
+		MIN_DIAMETER = 1.4,
+		MIN_HEIGHT = 1.6,
+	}),
 
 	ROLE_HIDER = "Hider",
 	ROLE_SEEKER = "Seeker",

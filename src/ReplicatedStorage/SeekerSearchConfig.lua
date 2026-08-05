@@ -3,6 +3,7 @@
 return table.freeze({
 	SEARCH_SHAPE_VERSION = 2,
 	SEARCH_SHAPE_VERSION_ATTRIBUTE = "SeekerSearchShapeVersion",
+	RAYCAST_COLLISION_GROUP = "SeekerSearchRaycasts",
 	SEARCH_RADIUS = 3,
 	FORWARD_RADIUS_BONUS = 3,
 	FORWARD_RAY_FRACTION = 1 / 4,

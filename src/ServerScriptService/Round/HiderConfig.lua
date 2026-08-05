@@ -5,7 +5,7 @@ return table.freeze({
 	ROLE_SEEKER = "Seeker",
 	STARTING_PHASE = "Starting",
 	ROUND_PHASE = "Round",
-	START_STAGGER_MAX_SECONDS = 0,
+	START_STAGGER_MAX_SECONDS = 0.65,
 
 	MAP_CONTAINER_NAME = "Map",
 	MAP_FLOOR_NAME = "Floor",
@@ -39,6 +39,9 @@ return table.freeze({
 	WANDER_UNVISITED_SECTOR_BONUS = 500,
 	WANDER_REVISIT_RECOVERY_PER_SECOND = 4,
 	WANDER_REVISIT_BONUS_CAP = 300,
+	TARGET_RESERVATION_RADIUS = 10,
+	TARGET_RESERVATION_PROXIMITY_PENALTY = 350,
+	TARGET_RESERVATION_SECTOR_PENALTY = 260,
 
 	ROUTE_PREFETCH_DISTANCE = 14,
 	PREFETCH_RETRY_SECONDS = 0.35,
@@ -49,13 +52,17 @@ return table.freeze({
 	PROGRESS_EPSILON = 0.08,
 	STALL_SECONDS = 0.9,
 
-	-- NPCs keep colliding with hinged gates just like players. When movement
-	-- stops at a gate, a small physical impulse helps the server-owned
-	-- Humanoid push the moving leaf instead of endlessly replanning into it.
-	DOOR_INTERACTION_DELAY = 0.2,
-	DOOR_PUSH_INTERVAL = 0.3,
-	DOOR_PROBE_FORWARD_OFFSET = 0.35,
-	DOOR_PROBE_RADIUS = 2.25,
-	DOOR_PUSH_SPEED_CHANGE = 2.5,
+	-- NPCs use the same physical gate proxy as players. When movement stops at
+	-- a gate, a small impulse helps the server-owned Humanoid push the moving
+	-- leaf instead of endlessly replanning into it.
+	DOOR_INTERACTION_DELAY = 0.1,
+	DOOR_INTERACTION_MAX_SECONDS = 1.8,
+	DOOR_PUSH_INTERVAL = 0.15,
+	DOOR_SERVER_OWNERSHIP_SECONDS = 1.25,
+	DOOR_PROBE_FORWARD_OFFSET = 0.15,
+	-- Includes the 1.5x Seeker proxy radius plus a small contact tolerance.
+	DOOR_PROBE_RADIUS = 1.65,
+	DOOR_PUSH_CONTACT_DISTANCE = 1.55,
+	DOOR_PUSH_SPEED_CHANGE = 1,
 	DOOR_PROBE_MAX_PARTS = 16,
 })

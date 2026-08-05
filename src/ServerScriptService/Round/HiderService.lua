@@ -32,7 +32,6 @@ local function shouldNpcMove(npc: Model): boolean
 end
 
 local function run(controller: HiderBrain.Controller)
-	task.wait(math.random() * HiderConfig.START_STAGGER_MAX_SECONDS)
 	while controller.running and controller.npc.Parent and controllers[controller.npc] == controller do
 		local succeeded, message = xpcall(function()
 			HiderBrain.Step(controller)
