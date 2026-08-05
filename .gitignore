@@ -1,0 +1,23 @@
+# Generated Roblox place/model files
+/build/*
+!/build/.gitkeep
+/*.rbxl
+/*.rbxlx
+/*.rbxm
+/*.rbxmx
+/*.rbxl.lock
+/*.rbxlx.lock
+
+# Rojo-generated files
+/sourcemap.json
+
+# Wally-generated packages (keep placeholders so a clean clone can build)
+/Packages/*
+!/Packages/.gitkeep
+/ServerPackages/*
+!/ServerPackages/.gitkeep
+
+# Local/editor files
+.DS_Store
+Thumbs.db
+*.log

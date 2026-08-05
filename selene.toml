@@ -1,0 +1,10 @@
+std = "roblox"
+
+[lints]
+almost_swapped = "warn"
+divide_by_zero = "deny"
+empty_if = "warn"
+global_usage = "deny"
+multiple_statements = "warn"
+shadowing = "warn"
+unscoped_variables = "deny"

@@ -1,0 +1,34 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Rojo: Serve",
+      "type": "shell",
+      "command": "rojo",
+      "args": ["serve", "default.project.json"],
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Rojo: Build",
+      "type": "shell",
+      "command": "rojo",
+      "args": ["build", "default.project.json", "--output", "build/HideNSeek.rbxlx"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Luau: Lint",
+      "type": "shell",
+      "command": "selene",
+      "args": ["src"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Luau: Format Check",
+      "type": "shell",
+      "command": "stylua",
+      "args": ["--check", "src"],
+      "problemMatcher": []
+    }
+  ]
+}

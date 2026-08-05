@@ -1,0 +1,15 @@
+[package]
+name = "dorag/hide-n-seek"
+description = "Hide and seek game for Roblox"
+version = "0.1.0"
+license = "MIT"
+authors = ["dorag"]
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "shared"
+private = true
+
+[dependencies]
+
+[server-dependencies]
+
+[dev-dependencies]
