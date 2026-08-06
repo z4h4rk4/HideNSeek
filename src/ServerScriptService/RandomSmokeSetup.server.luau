@@ -8,6 +8,9 @@ local SoundService = game:GetService("SoundService")
 local Workspace = game:GetService("Workspace")
 
 local SeekerSearchConfig = require(ReplicatedStorage:WaitForChild("SeekerSearchConfig"))
+local HiderEvidenceService = require(
+	script.Parent:WaitForChild("Round"):WaitForChild("HiderEvidenceService")
+)
 
 local SOURCE_FOLDER_NAME = "Smokes"
 local SMOKE_TEMPLATE_NAME = "smoke-01"
@@ -188,12 +191,22 @@ task.spawn(function()
 
 				if state.secondsUntilEffect <= 0 then
 					smokeRemote:FireAllClients(character, SMOKE_EFFECT_KIND)
+					HiderEvidenceService.Emit(
+						character,
+						HiderEvidenceService.KIND_SMOKE,
+						rootPart.Position
+					)
 					state.secondsUntilEffect = random:NextNumber(MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS)
 				end
 			elseif not state.fartPlayed then
 				state.standingSeconds += elapsed
 				if state.standingSeconds >= FART_DELAY_SECONDS then
 					smokeRemote:FireAllClients(character, FART_EFFECT_KIND)
+					HiderEvidenceService.Emit(
+						character,
+						HiderEvidenceService.KIND_FART,
+						rootPart.Position
+					)
 					playFartSound(rootPart)
 					state.fartPlayed = true
 				end

@@ -11,6 +11,7 @@ local roundModules = script.Parent:WaitForChild("Round")
 local RoundConfig = require(roundModules:WaitForChild("RoundConfig"))
 local DoorCharacterCollider = require(roundModules:WaitForChild("DoorCharacterCollider"))
 local SeekerSearchConfig = require(ReplicatedStorage:WaitForChild("SeekerSearchConfig"))
+local HiderEvidenceService = require(roundModules:WaitForChild("HiderEvidenceService"))
 local HiderService = require(roundModules:WaitForChild("HiderService"))
 local RoundCharacterState = require(roundModules:WaitForChild("RoundCharacterState"))
 local RoundControl = require(roundModules:WaitForChild("RoundControl"))
@@ -31,6 +32,7 @@ local ROUND_END_DURATION_SECONDS = RoundConfig.ROUND_END_DURATION_SECONDS
 local MINIMUM_PLAYERS = RoundConfig.MINIMUM_PLAYERS
 local MAX_HIDERS = RoundConfig.MAX_HIDERS
 local MAX_SEEKERS = RoundConfig.MAX_SEEKERS
+local BOT_SEEKER_MODE = RoundConfig.BOT_SEEKER_MODE
 local WALK_SPEED = RoundConfig.WALK_SPEED
 local SEEKER_SCALE_MULTIPLIER = RoundConfig.SEEKER_SCALE_MULTIPLIER
 local NPC_SPAWN_SPACING = RoundConfig.NPC.SPAWN_SPACING
@@ -82,6 +84,7 @@ local SPAWN_SLOT_COORDINATES = table.freeze({
 })
 
 DoorCharacterCollider.Configure()
+HiderEvidenceService.Start()
 
 local function getOrCreateTeam(name: string, color: BrickColor): Team
 	local existing = Teams:FindFirstChild(name)
@@ -121,6 +124,7 @@ end
 
 roundState:SetAttribute("MaxHiders", MAX_HIDERS)
 roundState:SetAttribute("MaxSeekers", MAX_SEEKERS)
+roundState:SetAttribute("BotSeekerMode", BOT_SEEKER_MODE)
 roundState:SetAttribute("HiderCount", 0)
 roundState:SetAttribute("CaughtHiderCount", 0)
 roundState:SetAttribute("SeekerCount", 0)
@@ -836,18 +840,25 @@ local function assignRoles()
 		setSpectator(player)
 	end
 
-	local roleSlots: {string} = {}
-	for _ = 1, MAX_HIDERS do
-		table.insert(roleSlots, ROLE_HIDER)
-	end
-	for _ = 1, MAX_SEEKERS do
-		table.insert(roleSlots, ROLE_SEEKER)
-	end
-	shuffleRoles(roleSlots)
+	if BOT_SEEKER_MODE then
+		local participantCount = math.min(#players, MAX_HIDERS)
+		for index = 1, participantCount do
+			setPlayerRole(players[index], ROLE_HIDER, index)
+		end
+	else
+		local roleSlots: {string} = {}
+		for _ = 1, MAX_HIDERS do
+			table.insert(roleSlots, ROLE_HIDER)
+		end
+		for _ = 1, MAX_SEEKERS do
+			table.insert(roleSlots, ROLE_SEEKER)
+		end
+		shuffleRoles(roleSlots)
 
-	local participantCount = math.min(#players, #roleSlots)
-	for index = 1, participantCount do
-		setPlayerRole(players[index], roleSlots[index], index)
+		local participantCount = math.min(#players, #roleSlots)
+		for index = 1, participantCount do
+			setPlayerRole(players[index], roleSlots[index], index)
+		end
 	end
 	fillNpcSlots()
 
@@ -859,6 +870,7 @@ local function setPhase(phase: string, durationSeconds: number)
 	phaseEndsAt = if durationSeconds > 0 then workspace:GetServerTimeNow() + durationSeconds else 0
 	roundState:SetAttribute("EndsAt", phaseEndsAt)
 	refreshAllCharacterRoundStates()
+	HiderEvidenceService.SetPhase(phase)
 	HiderService.SetPhase(phase)
 	SeekerCaptureService.SetPhase(phase)
 end
@@ -900,7 +912,7 @@ local function replaceNpcWithPlayer(player: Player): boolean
 		local role = child:GetAttribute("RoundRole")
 		if child:IsA("Model")
 			and child:GetAttribute(MANAGED_NPC_ATTRIBUTE) == true
-			and (role == ROLE_HIDER or role == ROLE_SEEKER) then
+			and (role == ROLE_HIDER or (not BOT_SEEKER_MODE and role == ROLE_SEEKER)) then
 			local npcSpawnSlot = child:GetAttribute(ROUND_SPAWN_SLOT_ATTRIBUTE)
 			HiderService.Stop(child)
 			RoundCharacterState.Clear(child)
@@ -1061,6 +1073,7 @@ RoundControl.Register(function(action: string, arguments: {[string]: any}): (boo
 			SeekerCount = roundState:GetAttribute("SeekerCount"),
 			MaxHiders = MAX_HIDERS,
 			MaxSeekers = MAX_SEEKERS,
+			BotSeekerMode = BOT_SEEKER_MODE,
 			NpcCount = getManagedNpcCount(),
 			NpcHiderCount = npcHiders,
 			NpcSeekerCount = npcSeekers,
@@ -1074,6 +1087,9 @@ RoundControl.Register(function(action: string, arguments: {[string]: any}): (boo
 		if not target
 			or (role ~= ROLE_HIDER and role ~= ROLE_SEEKER and role ~= ROLE_SPECTATOR) then
 			return false, "Invalid player or role.", nil
+		end
+		if BOT_SEEKER_MODE and role == ROLE_SEEKER then
+			return false, "Bot Seeker mode does not allow a player Seeker.", nil
 		end
 		local currentRole = target:GetAttribute("RoundRole")
 		if currentRole ~= role and role ~= ROLE_SPECTATOR then
@@ -1162,10 +1178,20 @@ RoundControl.Register(function(action: string, arguments: {[string]: any}): (boo
 	end
 
 	if action == "ClearNpcs" then
-		local removed = getManagedNpcCount()
-		clearNpcs()
+		local phase = roundState:GetAttribute("Phase")
+		local preserveBotSeeker = BOT_SEEKER_MODE
+			and (phase == PHASE_STARTING or phase == PHASE_ROUND)
+		local removed = if preserveBotSeeker
+			then removeManagedNpcs(ROLE_HIDER)
+			else getManagedNpcCount()
+		if not preserveBotSeeker then
+			clearNpcs()
+		end
 		updateRoleCounts()
-		return true, `Removed {removed} managed NPC(s).`, { Removed = removed }
+		local message = if preserveBotSeeker
+			then `Removed {removed} managed Hider NPC(s); kept the bot Seeker.`
+			else `Removed {removed} managed NPC(s).`
+		return true, message, { Removed = removed }
 	end
 
 	if action == "SpawnNpc" then
@@ -1190,6 +1216,12 @@ RoundControl.Register(function(action: string, arguments: {[string]: any}): (boo
 		local role = arguments.Role
 		if role ~= ROLE_HIDER and role ~= ROLE_SEEKER then
 			return false, "Invalid NPC role.", nil
+		end
+		local phase = roundState:GetAttribute("Phase")
+		if BOT_SEEKER_MODE
+			and role == ROLE_SEEKER
+			and (phase == PHASE_STARTING or phase == PHASE_ROUND) then
+			return false, "The bot Seeker is required while the round is active.", nil
 		end
 		local removed = removeManagedNpcs(role)
 		return true, `Removed {removed} NPC {role}(s).`, { Removed = removed }

@@ -43,6 +43,32 @@ return table.freeze({
 	TARGET_RESERVATION_PROXIMITY_PENALTY = 350,
 	TARGET_RESERVATION_SECTOR_PENALTY = 260,
 
+	-- A Hider enters Escape only when it is visible inside the Seeker's forward
+	-- search sector (or inside the close 3-stud capture bubble). Normal wandering
+	-- does not evaluate Seeker positions at all.
+	FLEE_TRIGGER_DISTANCE = 12,
+	FLEE_THREAT_CHECK_INTERVAL = 0.2,
+	FLEE_RELEASE_DELAY = 0.8,
+	FLEE_ROUTE_REPLAN_INTERVAL = 1.25,
+	FLEE_DESTINATION_MIN_DISTANCE_GAIN = 5,
+	FLEE_DISTANCE_GAIN_SCORE_CAP = 20,
+	FLEE_DISTANCE_GAIN_WEIGHT = 24,
+	FLEE_DISTANCE_SCORE_CAP = 45,
+	FLEE_DISTANCE_WEIGHT = 5,
+	FLEE_DANGER_DISTANCE = 12,
+	FLEE_DANGER_PENALTY_PER_STUD = 40,
+	FLEE_ROUTE_CANDIDATE_LIMIT = 4,
+	FLEE_ROUTE_FIRST_GAIN_SCORE_CAP = 12,
+	FLEE_ROUTE_FIRST_GAIN_WEIGHT = 30,
+	FLEE_ROUTE_DANGER_PENALTY_PER_STUD = 70,
+	FLEE_ROUTE_APPROACH_TOLERANCE = 1,
+
+	-- The bot Seeker reacts to short-lived server evidence. It updates a route
+	-- only when the evidence point moves meaningfully, never every Heartbeat.
+	SEEKER_EVIDENCE_CHECK_INTERVAL = 0.2,
+	SEEKER_EVIDENCE_REPLAN_INTERVAL = 0.5,
+	SEEKER_EVIDENCE_REPLAN_DISTANCE = 2,
+
 	ROUTE_PREFETCH_DISTANCE = 14,
 	PREFETCH_RETRY_SECONDS = 0.35,
 	ROUTE_RETRY_SECONDS = 0.1,
