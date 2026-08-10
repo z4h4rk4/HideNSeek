@@ -6,6 +6,10 @@ return table.freeze({
 	STARTING_PHASE = "Starting",
 	ROUND_PHASE = "Round",
 	START_STAGGER_MAX_SECONDS = 0.65,
+	-- Keep turns responsive while softening abrupt direction changes at waypoints.
+	NPC_TURN_RESPONSIVENESS = 35,
+	NPC_TURN_MAX_ANGULAR_VELOCITY = 14,
+	NPC_TURN_MAX_TORQUE = 10000000,
 
 	MAP_CONTAINER_NAME = "Map",
 	MAP_FLOOR_NAME = "Floor",
@@ -15,18 +19,18 @@ return table.freeze({
 	MIN_GEOMETRY_SIZE = 0.05,
 	GEOMETRY_EPSILON = 0.01,
 
-	-- Walls have two mathematical contours. Hard clearance reserves room for
-	-- the NPC body; navigation clearance adds a deliberate safety margin.
-	BODY_RADIUS = 1.6,
-	SAFETY_MARGIN = 0.4,
-	NODE_OUTSET = 0.14,
-	NODE_MERGE_DISTANCE = 0.06,
+	-- The largest NPC root is about three studs wide. Do not add an artificial
+	-- comfort band: it made physically passable narrow corridors look closed.
+	BODY_RADIUS = 1.5,
+	SAFETY_MARGIN = 0,
+	NODE_OUTSET = 0.04,
+	NODE_MERGE_DISTANCE = 0.015,
 	INTERSECTION_OUTSET_DIRECTIONS = 12,
-	FLOOR_EDGE_CLEARANCE = 1.6,
-	FLOOR_TARGET_EDGE_MARGIN = 1.6,
+	FLOOR_EDGE_CLEARANCE = 1.5,
+	FLOOR_TARGET_EDGE_MARGIN = 1.5,
 	FLOOR_SAMPLE_ATTEMPTS = 40,
 
-	WANDER_SAMPLE_COUNT = 28,
+	WANDER_SAMPLE_COUNT = 48,
 	WANDER_PATH_CANDIDATE_LIMIT = 28,
 	WANDER_CANDIDATES_PER_SECTOR = 2,
 	WANDER_ABSOLUTE_MIN_TARGET_DISTANCE = 3,
@@ -43,9 +47,8 @@ return table.freeze({
 	TARGET_RESERVATION_PROXIMITY_PENALTY = 350,
 	TARGET_RESERVATION_SECTOR_PENALTY = 260,
 
-	-- A Hider enters Escape only when it is visible inside the Seeker's forward
-	-- search sector (or inside the close 3-stud capture bubble). Normal wandering
-	-- does not evaluate Seeker positions at all.
+	-- A Hider enters Escape only after the Seeker has actually detected it in
+	-- the vision cone. Normal wandering does not evaluate Seeker positions.
 	FLEE_TRIGGER_DISTANCE = 12,
 	FLEE_THREAT_CHECK_INTERVAL = 0.2,
 	FLEE_RELEASE_DELAY = 0.8,
@@ -63,11 +66,38 @@ return table.freeze({
 	FLEE_ROUTE_DANGER_PENALTY_PER_STUD = 70,
 	FLEE_ROUTE_APPROACH_TOLERANCE = 1,
 
-	-- The bot Seeker reacts to short-lived server evidence. It updates a route
-	-- only when the evidence point moves meaningfully, never every Heartbeat.
-	SEEKER_EVIDENCE_CHECK_INTERVAL = 0.2,
-	SEEKER_EVIDENCE_REPLAN_INTERVAL = 0.5,
-	SEEKER_EVIDENCE_REPLAN_DISTANCE = 2,
+	-- The bot Seeker patrols wall corners and may only acquire human Hiders
+	-- through its own vision cone and line of sight.
+	SEEKER_PATROL_NODE_SAMPLE_COUNT = 8,
+	SEEKER_PATROL_NODE_BONUS = 70,
+	SEEKER_TARGET_SWITCH_ADVANTAGE = 3,
+	SEEKER_EVIDENCE_CHECK_INTERVAL = 0.1,
+	SEEKER_EVIDENCE_REPLAN_INTERVAL = 0.3,
+	SEEKER_EVIDENCE_REPLAN_DISTANCE = 1.5,
+	SEEKER_CHASE_MIN_SECONDS = 3,
+	SEEKER_CHASE_MAX_SECONDS = 5,
+	SEEKER_REACQUIRE_COOLDOWN_SECONDS = 1,
+	-- Direct sight has a short, readable reaction beat before the chase. Patrol
+	-- remains at RoundConfig.SEEKER_WALK_SPEED; only an active sight chase gets
+	-- this speed multiplier and the more responsive initial turn.
+	SEEKER_AGGRO_REACTION_SECONDS = 0.22,
+	SEEKER_CHASE_SPEED_MULTIPLIER = 1.5,
+	SEEKER_AGGRO_TURN_RESPONSIVENESS = 90,
+	SEEKER_AGGRO_TURN_MAX_ANGULAR_VELOCITY = 40,
+	SEEKER_AGGRO_SOUND_TEMPLATE_NAME = "HunterAggroSound",
+	SEEKER_AGGRO_FALLBACK_SOUND_ID = "rbxasset://sounds/electronicpingshort.wav",
+	SEEKER_AGGRO_SOUND_VOLUME = 1.1,
+	SEEKER_AGGRO_SOUND_PLAYBACK_SPEED = 0.78,
+	SEEKER_AGGRO_SOUND_ROLLOFF_MIN_DISTANCE = 4,
+	SEEKER_AGGRO_SOUND_ROLLOFF_MAX_DISTANCE = 45,
+	SEEKER_AGGRO_INDICATOR_MAX_DISTANCE = 60,
+	SEEKER_AGGRO_INDICATOR_COLOR = Color3.fromRGB(255, 72, 48),
+	SEEKER_AGGRO_INDICATOR_WIDTH = 48,
+	SEEKER_AGGRO_INDICATOR_HEIGHT = 58,
+	SEEKER_AGGRO_INDICATOR_MIN_HEIGHT = 4.5,
+	SEEKER_AGGRO_INDICATOR_TOP_PADDING = 0.8,
+	SEEKER_AGGRO_INDICATOR_POP_SECONDS = 0.1,
+	SEEKER_AGGRO_INDICATOR_SETTLE_SECONDS = 0.12,
 
 	ROUTE_PREFETCH_DISTANCE = 14,
 	PREFETCH_RETRY_SECONDS = 0.35,

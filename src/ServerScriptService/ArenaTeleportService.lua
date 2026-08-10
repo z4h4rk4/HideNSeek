@@ -12,6 +12,9 @@ local TELEPORT_REMOTE_NAME = "ArenaTeleported"
 local TELEPORT_COOLDOWN_SECONDS = 1
 local DESTINATION_CLEARANCE = 0.5
 local COOLDOWN_ATTRIBUTE = "ArenaTeleportCooldownUntil"
+local MANAGED_NPC_ATTRIBUTE = "ManagedRoundNPC"
+local ROLE_ATTRIBUTE = "RoundRole"
+local ROLE_SEEKER = "Seeker"
 
 export type TeleportLink = {
 	Entry: BasePart,
@@ -24,7 +27,9 @@ type PairRecord = {
 	padTwo: BasePart,
 }
 
-local ArenaTeleportService = {}
+local ArenaTeleportService = {
+	COOLDOWN_ATTRIBUTE = COOLDOWN_ATTRIBUTE,
+}
 local registeredPairs: {[Instance]: PairRecord} = {}
 local started = false
 local teleportRemote: RemoteEvent? = nil
@@ -44,11 +49,16 @@ local function getOrCreateRemote(): RemoteEvent
 	return remote
 end
 
-local function getPlayerCharacter(hit: BasePart): Model?
+local function getTeleportCharacter(hit: BasePart): Model?
 	local current: Instance? = hit.Parent
 	while current and current ~= workspace do
-		if current:IsA("Model") and Players:GetPlayerFromCharacter(current) then
-			return current
+		if current:IsA("Model") then
+			local isPlayerCharacter = Players:GetPlayerFromCharacter(current) ~= nil
+			local isNpcSeeker = current:GetAttribute(MANAGED_NPC_ATTRIBUTE) == true
+				and current:GetAttribute(ROLE_ATTRIBUTE) == ROLE_SEEKER
+			if isPlayerCharacter or isNpcSeeker then
+				return current
+			end
 		end
 		current = current.Parent
 	end
@@ -116,10 +126,10 @@ local function unregisterPair(container: Instance)
 	registeredPairs[container] = nil
 end
 
-local function connectPlayerPad(source: BasePart, destination: BasePart, connections: {RBXScriptConnection})
+local function connectTeleportPad(source: BasePart, destination: BasePart, connections: {RBXScriptConnection})
 	source.CanTouch = true
 	table.insert(connections, source.Touched:Connect(function(hit)
-		local character = getPlayerCharacter(hit)
+		local character = getTeleportCharacter(hit)
 		if character then
 			ArenaTeleportService.TeleportCharacter(character, destination)
 		end
@@ -145,8 +155,8 @@ local function registerPair(container: Instance): boolean
 		padOne = padOne,
 		padTwo = padTwo,
 	}
-	connectPlayerPad(padOne, padTwo, connections)
-	connectPlayerPad(padTwo, padOne, connections)
+	connectTeleportPad(padOne, padTwo, connections)
+	connectTeleportPad(padTwo, padOne, connections)
 
 	local function unregister()
 		unregisterPair(container)

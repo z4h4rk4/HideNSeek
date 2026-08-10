@@ -401,6 +401,13 @@ function HiderMapGeometry.GetForPosition(position: Vector3): ArenaGeometry?
 	return selected
 end
 
+function HiderMapGeometry.ContainsPosition(
+	geometry: ArenaGeometry,
+	position: Vector3
+): boolean
+	return pointInsideFloor(geometry, toPoint2(position))
+end
+
 function HiderMapGeometry.PointIsNavigable(geometry: ArenaGeometry, point: Vector2): boolean
 	if not pointInsideFloor(geometry, point) then
 		return false
@@ -459,6 +466,23 @@ function HiderMapGeometry.GetNavigationBoundary(obstacle: Rectangle): {Vector2}
 	return rectangleCorners(obstacle, obstacle.navHalfX, obstacle.navHalfZ)
 end
 
+function HiderMapGeometry.GetSectorId(geometry: ArenaGeometry, position: Vector3): string
+	local point = toPoint2(position)
+	local xRatio = math.clamp(
+		(point.X - geometry.minX) / math.max(geometry.maxX - geometry.minX, 0.01),
+		0,
+		0.999
+	)
+	local zRatio = math.clamp(
+		(point.Y - geometry.minZ) / math.max(geometry.maxZ - geometry.minZ, 0.01),
+		0,
+		0.999
+	)
+	local sectorX = math.floor(xRatio * HiderConfig.WANDER_SECTOR_COUNT)
+	local sectorZ = math.floor(zRatio * HiderConfig.WANDER_SECTOR_COUNT)
+	return `{geometry.map:GetFullName()}:{sectorX}:{sectorZ}`
+end
+
 function HiderMapGeometry.SampleDestination(
 	geometry: ArenaGeometry,
 	random: Random
@@ -496,21 +520,9 @@ function HiderMapGeometry.SampleDestination(
 			continue
 		end
 
-		local xRatio = math.clamp(
-			(point.X - geometry.minX) / math.max(geometry.maxX - geometry.minX, 0.01),
-			0,
-			0.999
-		)
-		local zRatio = math.clamp(
-			(point.Y - geometry.minZ) / math.max(geometry.maxZ - geometry.minZ, 0.01),
-			0,
-			0.999
-		)
-		local sectorX = math.floor(xRatio * HiderConfig.WANDER_SECTOR_COUNT)
-		local sectorZ = math.floor(zRatio * HiderConfig.WANDER_SECTOR_COUNT)
 		return {
 			position = world,
-			sectorId = `{geometry.map:GetFullName()}:{sectorX}:{sectorZ}`,
+			sectorId = HiderMapGeometry.GetSectorId(geometry, world),
 		}
 	end
 	return nil

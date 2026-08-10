@@ -9,7 +9,16 @@ local Validation = require(script.Parent:WaitForChild("AdminValidationCore"))
 local CurrencyService = require(
 	script.Parent.Parent:WaitForChild("Currency"):WaitForChild("CurrencyService")
 )
-local RoundControl = require(script.Parent.Parent:WaitForChild("Round"):WaitForChild("RoundControl"))
+local roundModules = script.Parent.Parent:WaitForChild("Round")
+local RoundConfig = require(roundModules:WaitForChild("RoundConfig"))
+local RoundControl = require(roundModules:WaitForChild("RoundControl"))
+
+-- AdminConfig is an independent safety ceiling. The gameplay cap may be made
+-- smaller without accidentally letting the panel exceed it.
+local MAX_NPC_POPULATION = math.min(
+	Config.MaxNpcPopulation,
+	RoundConfig.NPC.MAX_ACTIVE_NPCS
+)
 
 local AdminService = {}
 
@@ -56,6 +65,13 @@ local ENABLED_KEYS = table.freeze({
 	Sequence = true,
 	Enabled = true,
 })
+local NPC_POPULATION_KEYS = table.freeze({
+	Action = true,
+	RequestId = true,
+	Sequence = true,
+	HiderCount = true,
+	SeekerCount = true,
+})
 
 type Schema = {
 	Keys: {[string]: boolean},
@@ -80,6 +96,8 @@ local ACTION_SCHEMAS: {[string]: Schema} = table.freeze({
 	ClearNpcs = { Keys = GLOBAL_KEYS, NeedsTarget = false, Mutation = true },
 	SpawnNpc = { Keys = NPC_ROLE_KEYS, NeedsTarget = false, Mutation = true },
 	RemoveNpcs = { Keys = NPC_ROLE_KEYS, NeedsTarget = false, Mutation = true },
+	SetNpcPopulation = { Keys = NPC_POPULATION_KEYS, NeedsTarget = false, Mutation = true },
+	ClearNpcPopulationOverride = { Keys = GLOBAL_KEYS, NeedsTarget = false, Mutation = true },
 	SetNpcAIEnabled = { Keys = ENABLED_KEYS, NeedsTarget = false, Mutation = true },
 })
 
@@ -164,6 +182,11 @@ local function roundSnapshot(): {[string]: any}
 	local maxHiders = 0
 	local maxSeekers = 0
 	local npcAIEnabled = true
+	local botSeekerMode = false
+	local npcPopulationOverrideEnabled = false
+	local npcTargetHiders = 0
+	local npcTargetSeekers = 0
+	local maxAdminNpcs = MAX_NPC_POPULATION
 	local activeArena = "None"
 	if roundState then
 		phase = tostring(roundState:GetAttribute("Phase") or "Unavailable")
@@ -181,6 +204,14 @@ local function roundSnapshot(): {[string]: any}
 		if type(enabledAttribute) == "boolean" then
 			npcAIEnabled = enabledAttribute
 		end
+		botSeekerMode = roundState:GetAttribute("BotSeekerMode") == true
+		npcPopulationOverrideEnabled = roundState:GetAttribute("NpcPopulationOverrideEnabled") == true
+		npcTargetHiders = tonumber(roundState:GetAttribute("NpcTargetHiders")) or 0
+		npcTargetSeekers = tonumber(roundState:GetAttribute("NpcTargetSeekers")) or 0
+		maxAdminNpcs = math.min(
+			tonumber(roundState:GetAttribute("MaxAdminNpcs")) or maxAdminNpcs,
+			MAX_NPC_POPULATION
+		)
 	end
 
 	local stateOk, _, controlState = RoundControl.Execute("GetState", {})
@@ -193,6 +224,21 @@ local function roundSnapshot(): {[string]: any}
 		end
 		if type(controlState.NpcAIEnabled) == "boolean" then
 			npcAIEnabled = controlState.NpcAIEnabled
+		end
+		if type(controlState.BotSeekerMode) == "boolean" then
+			botSeekerMode = controlState.BotSeekerMode
+		end
+		if type(controlState.NpcPopulationOverrideEnabled) == "boolean" then
+			npcPopulationOverrideEnabled = controlState.NpcPopulationOverrideEnabled
+		end
+		if type(controlState.NpcTargetHiders) == "number" then
+			npcTargetHiders = controlState.NpcTargetHiders
+		end
+		if type(controlState.NpcTargetSeekers) == "number" then
+			npcTargetSeekers = controlState.NpcTargetSeekers
+		end
+		if type(controlState.MaxAdminNpcs) == "number" then
+			maxAdminNpcs = math.min(controlState.MaxAdminNpcs, MAX_NPC_POPULATION)
 		end
 		if type(controlState.ActiveArena) == "string" and controlState.ActiveArena ~= "" then
 			activeArena = controlState.ActiveArena
@@ -214,6 +260,11 @@ local function roundSnapshot(): {[string]: any}
 		HiderNpcCount = hiderNpcs,
 		SeekerNpcCount = seekerNpcs,
 		NpcAIEnabled = npcAIEnabled,
+		BotSeekerMode = botSeekerMode,
+		NpcPopulationOverrideEnabled = npcPopulationOverrideEnabled,
+		NpcTargetHiders = npcTargetHiders,
+		NpcTargetSeekers = npcTargetSeekers,
+		MaxAdminNpcs = maxAdminNpcs,
 	}
 end
 
@@ -221,9 +272,6 @@ local function buildSnapshot(target: Player): {[string]: any}
 	local character = target.Character
 	local humanoid = if character then character:FindFirstChildOfClass("Humanoid") else nil
 	local currency = CurrencyService.GetCurrency(target)
-	local searchCaged = target:GetAttribute("SearchCaged") == true
-		or (character ~= nil and character:GetAttribute("SearchCaged") == true)
-	local cagedUntil = target:GetAttribute("SearchCagedUntil")
 	return {
 		TargetUserId = target.UserId,
 		TargetName = target.Name,
@@ -237,12 +285,21 @@ local function buildSnapshot(target: Player): {[string]: any}
 		MaxHealth = if humanoid then humanoid.MaxHealth else 0,
 		WalkSpeed = if humanoid then humanoid.WalkSpeed else 0,
 		CharacterScale = if character then character:GetScale() else 0,
-		SearchCaged = searchCaged,
-		CagedRemaining = if searchCaged and type(cagedUntil) == "number"
-			then math.max(0, math.ceil(cagedUntil - Workspace:GetServerTimeNow()))
-			else 0,
 		Round = roundSnapshot(),
 	}
+end
+
+local function safeBuildSnapshot(target: Player): {[string]: any}?
+	local succeeded, snapshotOrError = pcall(buildSnapshot, target)
+	if succeeded and type(snapshotOrError) == "table" then
+		return snapshotOrError
+	end
+	warn(("[AdminPanel] Snapshot failed for %s (%d): %s"):format(
+		target.Name,
+		target.UserId,
+		tostring(snapshotOrError)
+	))
+	return nil
 end
 
 local function audit(admin: Player, action: string, target: Player?, details: string)
@@ -270,7 +327,23 @@ local function executeRoundAction(
 		return failure("ROUND_CONTROL_FAILED", message)
 	end
 	audit(admin, action, nil, details)
-	return response(true, nil, message, buildSnapshot(admin), data)
+	local responseData: {[string]: any} = {}
+	if type(data) == "table" then
+		for key, value in data do
+			if type(key) == "string" then
+				responseData[key] = value
+			end
+		end
+	end
+	local snapshotSucceeded, currentRoundOrError = pcall(roundSnapshot)
+	if snapshotSucceeded and type(currentRoundOrError) == "table" then
+		responseData.Round = currentRoundOrError
+	else
+		warn(("[AdminPanel] Post-action round snapshot failed: %s"):format(
+			tostring(currentRoundOrError)
+		))
+	end
+	return response(true, nil, message, nil, responseData)
 end
 
 function AdminService.IsAuthorized(player: Player): boolean
@@ -352,7 +425,7 @@ function AdminService.HandleRequest(admin: Player, payload: any)
 			if action == "AddCoins"
 				then ("Added %d Coins."):format(amount)
 				else ("Removed %d Coins."):format(amount),
-			buildSnapshot(targetPlayer),
+			safeBuildSnapshot(targetPlayer),
 			nil
 		)
 	end
@@ -364,7 +437,7 @@ function AdminService.HandleRequest(admin: Player, payload: any)
 			return failure(saveError, "The profile could not be saved.")
 		end
 		audit(admin, action, targetPlayer, "saved=true")
-		return response(true, nil, "Profile saved successfully.", buildSnapshot(targetPlayer), nil)
+		return response(true, nil, "Profile saved successfully.", safeBuildSnapshot(targetPlayer), nil)
 	end
 
 	if action == "SetRole" then
@@ -382,14 +455,14 @@ function AdminService.HandleRequest(admin: Player, payload: any)
 			return failure("ROUND_CONTROL_FAILED", message)
 		end
 		audit(admin, action, targetPlayer, ("role=%s->%s"):format(before, role))
-		return response(true, nil, message, buildSnapshot(targetPlayer), data)
+		return response(true, nil, message, safeBuildSnapshot(targetPlayer), data)
 	end
 
 	if action == "RespawnPlayer" then
 		local targetPlayer = target :: Player
 		targetPlayer:LoadCharacter()
 		audit(admin, action, targetPlayer, "requested=true")
-		return response(true, nil, "Player respawned.", buildSnapshot(targetPlayer), nil)
+		return response(true, nil, "Player respawned.", safeBuildSnapshot(targetPlayer), nil)
 	end
 
 	if action == "HealPlayer" then
@@ -402,7 +475,7 @@ function AdminService.HandleRequest(admin: Player, payload: any)
 		local before = humanoid.Health
 		humanoid.Health = humanoid.MaxHealth
 		audit(admin, action, targetPlayer, ("health=%.2f->%.2f"):format(before, humanoid.Health))
-		return response(true, nil, "Player healed.", buildSnapshot(targetPlayer), nil)
+		return response(true, nil, "Player healed.", safeBuildSnapshot(targetPlayer), nil)
 	end
 
 	if action == "NormalizeMovement" then
@@ -414,7 +487,7 @@ function AdminService.HandleRequest(admin: Player, payload: any)
 			return failure("ROUND_CONTROL_FAILED", message)
 		end
 		audit(admin, action, targetPlayer, "normalized=true")
-		return response(true, nil, message, buildSnapshot(targetPlayer), data)
+		return response(true, nil, message, safeBuildSnapshot(targetPlayer), data)
 	end
 
 	if action == "StartRoundNow" or action == "EndRound" or action == "RestartRound" then
@@ -444,7 +517,40 @@ function AdminService.HandleRequest(admin: Player, payload: any)
 		)
 	end
 
-	if action == "FillNpcSlots" or action == "ClearNpcs" then
+	if action == "SetNpcPopulation" then
+		local hiderCount = Validation.ParseIntegerInRange(
+			payload.HiderCount,
+			0,
+			MAX_NPC_POPULATION
+		)
+		local seekerCount = Validation.ParseIntegerInRange(
+			payload.SeekerCount,
+			0,
+			MAX_NPC_POPULATION
+		)
+		if not hiderCount or not seekerCount or hiderCount + seekerCount > MAX_NPC_POPULATION then
+			return failure(
+				"INVALID_NPC_POPULATION",
+				("Use whole NPC counts from 0 to %d; their sum cannot exceed %d."):format(
+					MAX_NPC_POPULATION,
+					MAX_NPC_POPULATION
+				)
+			)
+		end
+		return executeRoundAction(
+			admin,
+			action,
+			{
+				HiderCount = hiderCount,
+				SeekerCount = seekerCount,
+			},
+			("hiders=%d seekers=%d"):format(hiderCount, seekerCount)
+		)
+	end
+
+	if action == "FillNpcSlots"
+		or action == "ClearNpcs"
+		or action == "ClearNpcPopulationOverride" then
 		return executeRoundAction(admin, action, {}, "requested=true")
 	end
 

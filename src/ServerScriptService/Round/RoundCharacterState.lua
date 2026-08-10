@@ -138,7 +138,9 @@ function RoundCharacterState.Apply(
 	setSeekerLocked(
 		character,
 		role == RoundConfig.ROLE_SEEKER
-			and (preparing or phase == RoundConfig.PHASE_STARTING)
+			and (preparing
+				or phase == RoundConfig.PHASE_PREPARING
+				or phase == RoundConfig.PHASE_STARTING)
 	)
 end
 

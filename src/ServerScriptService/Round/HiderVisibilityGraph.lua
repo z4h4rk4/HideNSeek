@@ -357,6 +357,18 @@ function HiderVisibilityGraph.FindPath(
 	return nil
 end
 
+function HiderVisibilityGraph.GetSearchPoints(
+	geometry: HiderMapGeometry.ArenaGeometry,
+	y: number
+): {Vector3}
+	local graph = getGraph(geometry)
+	local points: {Vector3} = {}
+	for _, node in ipairs(graph.nodes) do
+		table.insert(points, world(node, y))
+	end
+	return points
+end
+
 function HiderVisibilityGraph.GetStats(
 	geometry: HiderMapGeometry.ArenaGeometry
 ): GraphStats

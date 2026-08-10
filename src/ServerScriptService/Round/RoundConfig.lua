@@ -13,13 +13,17 @@ local npcColors = table.freeze({
 
 return table.freeze({
 	STARTING_DURATION_SECONDS = 15,
-	ROUND_DURATION_SECONDS = 60,
-	ROUND_END_DURATION_SECONDS = 3,
+	ROUND_DURATION_SECONDS = 90,
+	-- The Starting countdown begins in HUB. Participants are moved to the
+	-- arena only for its final ARENA_READY_DURATION_SECONDS.
+	ARENA_READY_DURATION_SECONDS = 5,
 	MINIMUM_PLAYERS = 1,
 	MAX_HIDERS = 6,
 	MAX_SEEKERS = 1,
 	BOT_SEEKER_MODE = true,
+	PLAYER_SEEKER_CHANCE = 0,
 	WALK_SPEED = 10,
+	SEEKER_WALK_SPEED = 5,
 	SEEKER_SCALE_MULTIPLIER = 1.5,
 	DOOR_COLLIDER = table.freeze({
 		-- Preserve each role's real width, but replace the animated multi-part
@@ -34,14 +38,15 @@ return table.freeze({
 	ROLE_SEEKER = "Seeker",
 	ROLE_SPECTATOR = "Spectator",
 	PHASE_WAITING = "Waiting",
+	PHASE_PREPARING = "Preparing",
 	PHASE_STARTING = "Starting",
 	PHASE_ROUND = "Round",
 	PHASE_ENDED = "Ended",
 
 	NPC = table.freeze({
-		SPAWN_SPACING = 6,
+		SPAWN_SPACING = 4,
 		SPAWN_CLEARANCE = 0.1,
-		MAX_ACTIVE_NPCS = 8,
+		MAX_ACTIVE_NPCS = 6,
 		COLORS = npcColors,
 	}),
 })

@@ -3,6 +3,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local ServerStorage = game:GetService("ServerStorage")
 local StarterPlayer = game:GetService("StarterPlayer")
 local Teams = game:GetService("Teams")
 local Workspace = game:GetService("Workspace")
@@ -13,6 +14,7 @@ local DoorCharacterCollider = require(roundModules:WaitForChild("DoorCharacterCo
 local SeekerSearchConfig = require(ReplicatedStorage:WaitForChild("SeekerSearchConfig"))
 local HiderEvidenceService = require(roundModules:WaitForChild("HiderEvidenceService"))
 local HiderService = require(roundModules:WaitForChild("HiderService"))
+local CageService = require(roundModules:WaitForChild("CageService"))
 local RoundCharacterState = require(roundModules:WaitForChild("RoundCharacterState"))
 local RoundControl = require(roundModules:WaitForChild("RoundControl"))
 local SeekerCaptureService = require(roundModules:WaitForChild("SeekerCaptureService"))
@@ -22,18 +24,21 @@ local HIDER_TEAM_NAME = "Hiders"
 local SEEKER_TEAM_NAME = "Seekers"
 local NPC_FOLDER_NAME = "RoundNPCs"
 local STARTER_CHARACTER_NAME = "StarterCharacter"
+local HUNTER_CHARACTER_NAME = "HunterCharacter"
 local HUB_CONTAINER_NAME = "HUB"
 local HUB_SPAWN_NAME = "SpawnHUB"
 local ARENA_SPAWN_NAME = "SpawnArena"
 
 local STARTING_DURATION_SECONDS = RoundConfig.STARTING_DURATION_SECONDS
 local ROUND_DURATION_SECONDS = RoundConfig.ROUND_DURATION_SECONDS
-local ROUND_END_DURATION_SECONDS = RoundConfig.ROUND_END_DURATION_SECONDS
+local ARENA_READY_DURATION_SECONDS = RoundConfig.ARENA_READY_DURATION_SECONDS
 local MINIMUM_PLAYERS = RoundConfig.MINIMUM_PLAYERS
 local MAX_HIDERS = RoundConfig.MAX_HIDERS
 local MAX_SEEKERS = RoundConfig.MAX_SEEKERS
 local BOT_SEEKER_MODE = RoundConfig.BOT_SEEKER_MODE
+local PLAYER_SEEKER_CHANCE = RoundConfig.PLAYER_SEEKER_CHANCE
 local WALK_SPEED = RoundConfig.WALK_SPEED
+local SEEKER_WALK_SPEED = RoundConfig.SEEKER_WALK_SPEED
 local SEEKER_SCALE_MULTIPLIER = RoundConfig.SEEKER_SCALE_MULTIPLIER
 local NPC_SPAWN_SPACING = RoundConfig.NPC.SPAWN_SPACING
 local NPC_SPAWN_CLEARANCE = RoundConfig.NPC.SPAWN_CLEARANCE
@@ -50,6 +55,7 @@ local ROLE_SEEKER = RoundConfig.ROLE_SEEKER
 local ROLE_SPECTATOR = RoundConfig.ROLE_SPECTATOR
 
 local PHASE_WAITING = RoundConfig.PHASE_WAITING
+local PHASE_PREPARING = RoundConfig.PHASE_PREPARING
 local PHASE_STARTING = RoundConfig.PHASE_STARTING
 local PHASE_ROUND = RoundConfig.PHASE_ROUND
 local PHASE_ENDED = RoundConfig.PHASE_ENDED
@@ -60,11 +66,21 @@ local skipCountdownRequested = false
 local endRoundRequested = false
 local restartRoundRequested = false
 local preparingRoundParticipants = false
+local startingParticipantsAssigned = false
 local pendingHiderReplacements = 0
 local caughtHiderCount = 0
 local activeArena: Instance? = nil
 local activeArenaSpawn: BasePart? = nil
 local previousArena: Instance? = nil
+
+type AdminNpcPopulation = {
+	Hiders: number,
+	Seekers: number,
+}
+
+-- This is a server-lifetime testing override. It deliberately is not saved to
+-- DataStore, so a bad test setup cannot leak into another server session.
+local adminNpcPopulation: AdminNpcPopulation? = nil
 
 type ArenaCandidate = {
 	Arena: Instance,
@@ -131,6 +147,10 @@ roundState:SetAttribute("SeekerCount", 0)
 roundState:SetAttribute("Phase", PHASE_WAITING)
 roundState:SetAttribute("EndsAt", 0)
 roundState:SetAttribute("NpcAIEnabled", true)
+roundState:SetAttribute("NpcPopulationOverrideEnabled", false)
+roundState:SetAttribute("NpcTargetHiders", 0)
+roundState:SetAttribute("NpcTargetSeekers", 0)
+roundState:SetAttribute("MaxAdminNpcs", MAX_ACTIVE_NPCS)
 roundState:SetAttribute("ActiveArena", "")
 roundState:SetAttribute("ActiveArenaSpawn", "")
 roundState:SetAttribute(
@@ -153,7 +173,7 @@ else
 end
 
 local npcSerial = 0
-local missingTemplateWarned = false
+local missingTemplateWarned: {[string]: boolean} = {}
 local missingHubSpawnWarned = false
 local missingArenaSpawnWarned = false
 local warnedSmallArenaSpawns: {[BasePart]: boolean} = {}
@@ -183,15 +203,51 @@ local function refreshAllCharacterRoundStates()
 	end
 end
 
+local function tryNpcCleanupStep(npc: Model, stepName: string, callback: () -> ())
+	local succeeded, message = pcall(callback)
+	if not succeeded then
+		warn(`RoundManager: {stepName} cleanup failed for {npc.Name}: {tostring(message)}`)
+	end
+end
+
+local function safelyDestroyManagedNpc(npc: Model): boolean
+	tryNpcCleanupStep(npc, "capture", function()
+		SeekerCaptureService.ClearOwner(npc)
+	end)
+	tryNpcCleanupStep(npc, "cage", function()
+		CageService.Remove(npc)
+	end)
+	tryNpcCleanupStep(npc, "evidence", function()
+		HiderEvidenceService.Clear(npc)
+	end)
+	tryNpcCleanupStep(npc, "AI", function()
+		HiderService.Stop(npc)
+	end)
+	tryNpcCleanupStep(npc, "round state", function()
+		RoundCharacterState.Clear(npc)
+	end)
+	local destroyed, message = pcall(function()
+		npc:Destroy()
+	end)
+	if not destroyed then
+		warn(`RoundManager: destroy failed for managed NPC {npc.Name}: {tostring(message)}`)
+	end
+	return destroyed
+end
+
 local function clearNpcs()
 	for _, child in ipairs(npcFolder:GetChildren()) do
 		if child:GetAttribute(MANAGED_NPC_ATTRIBUTE) == true then
-			SeekerCaptureService.ClearOwner(child)
 			if child:IsA("Model") then
-				HiderService.Stop(child)
-				RoundCharacterState.Clear(child)
+				safelyDestroyManagedNpc(child)
+			else
+				local destroyed, message = pcall(function()
+					child:Destroy()
+				end)
+				if not destroyed then
+					warn(`RoundManager: destroy failed for managed instance {child.Name}: {tostring(message)}`)
+				end
 			end
-			child:Destroy()
 		end
 	end
 end
@@ -428,7 +484,9 @@ local function getAvailableRoundSpawnSlot(preferred: any, ignored: Instance?): n
 	if isValidSpawnSlot(preferred) and not spawnSlotIsUsed(preferred, ignored) then
 		return preferred
 	end
-	local maximumSlots = MAX_HIDERS + MAX_SEEKERS
+	-- Exact admin NPC composition can coexist with the normal player roster.
+	-- Reserve enough unique slots so several Hunters do not stack together.
+	local maximumSlots = MAX_HIDERS + MAX_SEEKERS + MAX_ACTIVE_NPCS * 2
 	for slot = 1, maximumSlots do
 		if not spawnSlotIsUsed(slot, ignored) then
 			return slot
@@ -470,7 +528,11 @@ local function applyCharacterRoleScale(character: Model, role: string)
 		character:SetAttribute(BASE_SCALE_ATTRIBUTE, baseScale)
 	end
 
-	local targetScale = if role == ROLE_SEEKER then baseScale * SEEKER_SCALE_MULTIPLIER else baseScale
+	local isManagedNpcSeeker = role == ROLE_SEEKER
+		and character:GetAttribute(MANAGED_NPC_ATTRIBUTE) == true
+	local targetScale = if role == ROLE_SEEKER and not isManagedNpcSeeker
+		then baseScale * SEEKER_SCALE_MULTIPLIER
+		else baseScale
 	local scaleChanged = math.abs(character:GetScale() - targetScale) >= 0.001
 	if scaleChanged then
 		local succeeded, message = pcall(function()
@@ -488,7 +550,7 @@ local function applyCharacterRoleScale(character: Model, role: string)
 	-- ScaleTo also scales spatial Humanoid properties. Normalize movement only
 	-- after scaling so players and NPCs keep the same real speed at every size.
 	if humanoid then
-		humanoid.WalkSpeed = WALK_SPEED
+		humanoid.WalkSpeed = if role == ROLE_SEEKER then SEEKER_WALK_SPEED else WALK_SPEED
 		humanoid.UseJumpPower = false
 		humanoid.JumpHeight = 0
 	end
@@ -526,6 +588,7 @@ local function relocatePlayerForCurrentState(player: Player)
 	local role = player:GetAttribute("RoundRole")
 	local phase = roundState:GetAttribute("Phase")
 	local participantPhase = preparingRoundParticipants
+		or phase == PHASE_PREPARING
 		or phase == PHASE_STARTING
 		or phase == PHASE_ROUND
 	local arenaSpawn = activeArenaSpawn
@@ -550,6 +613,7 @@ end
 
 local function setSpectator(player: Player, caught: boolean?)
 	SeekerCaptureService.ClearOwner(player)
+	CageService.Remove(player)
 	player:SetAttribute(ROUND_CAUGHT_ATTRIBUTE, if caught == true then true else nil)
 	player:SetAttribute("RoundRole", ROLE_SPECTATOR)
 	player:SetAttribute(ROUND_SPAWN_SLOT_ATTRIBUTE, nil)
@@ -562,6 +626,7 @@ end
 
 local function setPlayerRole(player: Player, role: string, preferredSpawnSlot: number?)
 	SeekerCaptureService.ClearOwner(player)
+	CageService.Remove(player)
 	player:SetAttribute(ROUND_CAUGHT_ATTRIBUTE, nil)
 	local slot = getAvailableRoundSpawnSlot(
 		preferredSpawnSlot or player:GetAttribute(ROUND_SPAWN_SLOT_ATTRIBUTE),
@@ -577,7 +642,9 @@ local function setPlayerRole(player: Player, role: string, preferredSpawnSlot: n
 end
 
 local function resetRoles(preserveCaughtResults: boolean?)
+	startingParticipantsAssigned = false
 	SeekerCaptureService.CancelAll()
+	CageService.RemoveAll()
 	clearNpcs()
 	for _, player in ipairs(Players:GetPlayers()) do
 		setSpectator(player)
@@ -615,6 +682,20 @@ local function getRoleCounts(): (number, number)
 	return hiderCount, seekerCount
 end
 
+local function getPlayerRoleCounts(): (number, number)
+	local hiders = 0
+	local seekers = 0
+	for _, player in ipairs(Players:GetPlayers()) do
+		local role = player:GetAttribute("RoundRole")
+		if role == ROLE_HIDER then
+			hiders += 1
+		elseif role == ROLE_SEEKER then
+			seekers += 1
+		end
+	end
+	return hiders, seekers
+end
+
 local function getManagedNpcCount(): number
 	local count = 0
 	for _, child in ipairs(npcFolder:GetChildren()) do
@@ -623,6 +704,22 @@ local function getManagedNpcCount(): number
 		end
 	end
 	return count
+end
+
+local function getNpcRoleCounts(): (number, number)
+	local hiders = 0
+	local seekers = 0
+	for _, npc in ipairs(npcFolder:GetChildren()) do
+		if npc:IsA("Model") and npc:GetAttribute(MANAGED_NPC_ATTRIBUTE) == true then
+			local role = npc:GetAttribute("RoundRole")
+			if role == ROLE_HIDER then
+				hiders += 1
+			elseif role == ROLE_SEEKER then
+				seekers += 1
+			end
+		end
+	end
+	return hiders, seekers
 end
 
 local function chooseNpcRole(): string?
@@ -657,7 +754,7 @@ local function updateRoleCounts()
 end
 
 local function recordCaughtHider()
-	caughtHiderCount = math.min(MAX_HIDERS, caughtHiderCount + 1)
+	caughtHiderCount += 1
 	roundState:SetAttribute("CaughtHiderCount", caughtHiderCount)
 end
 
@@ -665,13 +762,6 @@ local function shufflePlayers(players: {Player})
 	for index = #players, 2, -1 do
 		local swapIndex = random:NextInteger(1, index)
 		players[index], players[swapIndex] = players[swapIndex], players[index]
-	end
-end
-
-local function shuffleRoles(roles: {string})
-	for index = #roles, 2, -1 do
-		local swapIndex = random:NextInteger(1, index)
-		roles[index], roles[swapIndex] = roles[swapIndex], roles[index]
 	end
 end
 
@@ -696,42 +786,111 @@ local function applyNpcColor(npc: Model, colorIndex: number)
 	highlight.Parent = npc
 end
 
+local function getValidatedNpcTemplate(role: string): (Model?, string)
+	local isHunter = role == ROLE_SEEKER
+	local templateContainer: Instance = if isHunter then ServerStorage else StarterPlayer
+	local templateName = if isHunter then HUNTER_CHARACTER_NAME else STARTER_CHARACTER_NAME
+	local templatePath = if isHunter
+		then `ServerStorage.{HUNTER_CHARACTER_NAME}`
+		else `StarterPlayer.{STARTER_CHARACTER_NAME}`
+	local template = templateContainer:FindFirstChild(templateName)
+	if not template or not template:IsA("Model") then
+		return nil, `{templatePath} must be a Model`
+	end
+	local humanoid = template:FindFirstChildOfClass("Humanoid")
+	local rootPart = template:FindFirstChild("HumanoidRootPart")
+	if not humanoid or not rootPart or not rootPart:IsA("BasePart") then
+		return nil, `{templatePath} needs Humanoid and HumanoidRootPart`
+	end
+	if isHunter then
+		local baseBody = template:FindFirstChild("BaseBody")
+		if not baseBody or not baseBody:IsA("BasePart") then
+			return nil, `{templatePath} needs a BasePart named BaseBody`
+		end
+	end
+	return template, templatePath
+end
+
 local function spawnNpc(role: string): boolean
 	local arenaSpawn = activeArenaSpawn
 	if not activeArenaIsAvailable() or not arenaSpawn then
 		return false
 	end
 
-	local template = StarterPlayer:FindFirstChild(STARTER_CHARACTER_NAME)
-	if not template or not template:IsA("Model") then
-		if not missingTemplateWarned then
-			missingTemplateWarned = true
-			warn(`RoundManager: StarterPlayer.{STARTER_CHARACTER_NAME} must be a Model to fill empty slots`)
+	local template, templatePath = getValidatedNpcTemplate(role)
+	if not template then
+		if not missingTemplateWarned[role] then
+			missingTemplateWarned[role] = true
+			warn(`RoundManager: {templatePath}`)
 		end
 		return false
 	end
 
-	missingTemplateWarned = false
+	missingTemplateWarned[role] = false
+	template.Archivable = true
 	npcSerial += 1
 	local spawnSlot = getAvailableRoundSpawnSlot(nil, nil)
 	local npc = template:Clone()
 	npc.Name = `NPC_{role}_{npcSerial}`
 	npc:SetAttribute(MANAGED_NPC_ATTRIBUTE, true)
 	npc:SetAttribute("RoundRole", role)
+	npc:SetAttribute(
+		SeekerSearchConfig.HIDER_INVISIBLE_ATTRIBUTE,
+		if role == ROLE_HIDER then true else nil
+	)
 	npc:SetAttribute(ROUND_SPAWN_SLOT_ATTRIBUTE, spawnSlot)
 	local humanoid = npc:FindFirstChildOfClass("Humanoid")
 	local rootPart = npc:FindFirstChild("HumanoidRootPart")
-	if not humanoid or not rootPart or not rootPart:IsA("BasePart") then
-		warn(`RoundManager: StarterPlayer.{STARTER_CHARACTER_NAME} needs Humanoid and HumanoidRootPart`)
-		npc:Destroy()
-		return false
+	assert(humanoid and rootPart and rootPart:IsA("BasePart"))
+	if role == ROLE_SEEKER then
+		-- HunterCharacter is a single-body rig without a Head/Neck. Disable the
+		-- standard neck requirement before parenting it to Workspace, otherwise
+		-- its Humanoid can die as soon as the clone enters the world.
+		humanoid.RequiresNeck = false
+		humanoid.BreakJointsOnDeath = false
+		if humanoid.MaxHealth <= 0 then
+			humanoid.MaxHealth = 100
+		end
+		humanoid.Health = humanoid.MaxHealth
+
+		local baseBody = npc:FindFirstChild("BaseBody")
+		if not baseBody or not baseBody:IsA("BasePart") then
+			warn(`RoundManager: {templatePath} needs a BasePart named BaseBody`)
+			npc:Destroy()
+			return false
+		end
+		local bodyWeld = rootPart:FindFirstChildOfClass("WeldConstraint")
+		if not bodyWeld then
+			bodyWeld = Instance.new("WeldConstraint")
+			bodyWeld.Name = "BodyWeld"
+			bodyWeld.Parent = rootPart
+		end
+		bodyWeld.Part0 = rootPart
+		bodyWeld.Part1 = baseBody
+		rootPart.RootPriority = 127
+		rootPart.CanCollide = false
+		baseBody.Anchored = false
+		baseBody.Massless = true
+		baseBody.CanCollide = false
+		baseBody.CanTouch = true
+		baseBody.CanQuery = true
+		local bodyHalfHeight = math.abs(baseBody.CFrame.RightVector.Y) * baseBody.Size.X * 0.5
+			+ math.abs(baseBody.CFrame.UpVector.Y) * baseBody.Size.Y * 0.5
+			+ math.abs(baseBody.CFrame.LookVector.Y) * baseBody.Size.Z * 0.5
+		local rootHeightAboveBodyBottom = rootPart.Position.Y
+			- (baseBody.Position.Y - bodyHalfHeight)
+		humanoid.HipHeight = math.max(
+			humanoid.HipHeight,
+			rootHeightAboveBodyBottom - rootPart.Size.Y * 0.5,
+			0
+		)
 	end
 	rootPart.Anchored = true
 	npc.Parent = npcFolder
 	applyCharacterRoleScale(npc, role)
 
 	humanoid.DisplayName = if role == ROLE_SEEKER then "NPC Seeker" else "NPC Hider"
-	humanoid.WalkSpeed = WALK_SPEED
+	humanoid.WalkSpeed = if role == ROLE_SEEKER then SEEKER_WALK_SPEED else WALK_SPEED
 	humanoid.UseJumpPower = false
 	humanoid.JumpHeight = 0
 	humanoid.AutoRotate = true
@@ -750,8 +909,12 @@ local function spawnNpc(role: string): boolean
 		end
 	end
 
-	rootPart.CFrame = getSpawnRootCFrame(arenaSpawn, spawnSlot, humanoid, rootPart)
-	applyNpcColor(npc, npcSerial)
+	local rootToPivot = rootPart.CFrame:ToObjectSpace(npc:GetPivot())
+	local destinationRoot = getSpawnRootCFrame(arenaSpawn, spawnSlot, humanoid, rootPart)
+	npc:PivotTo(destinationRoot * rootToPivot)
+	if role == ROLE_HIDER then
+		applyNpcColor(npc, npcSerial)
+	end
 	refreshCharacterRoundState(npc, role)
 	task.spawn(function()
 		RunService.Heartbeat:Wait()
@@ -780,23 +943,6 @@ local function spawnNpc(role: string): boolean
 	return true
 end
 
-local function fillNpcSlots(): (number, boolean)
-	local before = getManagedNpcCount()
-	local spawnFailed = false
-	while getManagedNpcCount() < MAX_ACTIVE_NPCS do
-		local role = chooseNpcRole()
-		if not role then
-			break
-		end
-		if not spawnNpc(role) then
-			spawnFailed = true
-			break
-		end
-	end
-	updateRoleCounts()
-	return getManagedNpcCount() - before, not spawnFailed
-end
-
 local function removeManagedNpcs(role: string?, maximumToRemove: number?): number
 	local removed = 0
 	local limit = maximumToRemove or math.huge
@@ -807,11 +953,9 @@ local function removeManagedNpcs(role: string?, maximumToRemove: number?): numbe
 		if child:IsA("Model")
 			and child:GetAttribute(MANAGED_NPC_ATTRIBUTE) == true
 			and (role == nil or child:GetAttribute("RoundRole") == role) then
-			SeekerCaptureService.ClearOwner(child)
-			HiderService.Stop(child)
-			RoundCharacterState.Clear(child)
-			child:Destroy()
-			removed += 1
+			if safelyDestroyManagedNpc(child) then
+				removed += 1
+			end
 		end
 	end
 	updateRoleCounts()
@@ -832,7 +976,169 @@ local function trimNpcRoleOverflow()
 	end
 end
 
-local function assignRoles()
+local function publishAdminNpcPopulation()
+	local population = adminNpcPopulation
+	roundState:SetAttribute("NpcPopulationOverrideEnabled", population ~= nil)
+	roundState:SetAttribute("NpcTargetHiders", if population then population.Hiders else 0)
+	roundState:SetAttribute("NpcTargetSeekers", if population then population.Seekers else 0)
+end
+
+local function reconcileAdminNpcPopulation(): (number, number, boolean, string?)
+	local population = adminNpcPopulation
+	if not population then
+		return 0, 0, true, nil
+	end
+
+	local currentHiders, currentSeekers = getNpcRoleCounts()
+	local hidersToAdd = math.max(0, population.Hiders - currentHiders)
+	local seekersToAdd = math.max(0, population.Seekers - currentSeekers)
+	if hidersToAdd + seekersToAdd > 0 then
+		if hidersToAdd > 0 then
+			local hiderTemplate = getValidatedNpcTemplate(ROLE_HIDER)
+			if not hiderTemplate then
+				return 0, 0, false, "INVALID_HIDER_TEMPLATE"
+			end
+		end
+		if seekersToAdd > 0 then
+			local seekerTemplate = getValidatedNpcTemplate(ROLE_SEEKER)
+			if not seekerTemplate then
+				return 0, 0, false, "INVALID_SEEKER_TEMPLATE"
+			end
+		end
+		local phase = roundState:GetAttribute("Phase")
+		if phase == PHASE_STARTING
+			and not preparingRoundParticipants
+			and not startingParticipantsAssigned then
+			return 0, 0, false, "PARTICIPANTS_NOT_READY"
+		end
+		if not activeArenaIsAvailable() or not activeArenaSpawn then
+			return 0, 0, false, "NO_ACTIVE_ARENA"
+		end
+	end
+
+	local added = 0
+	local removed = 0
+	for _ = currentHiders + 1, population.Hiders do
+		local callSucceeded, spawned = pcall(spawnNpc, ROLE_HIDER)
+		if not callSucceeded or not spawned then
+			if not callSucceeded then
+				warn(`RoundManager: exact Hider spawn failed: {tostring(spawned)}`)
+			end
+			updateRoleCounts()
+			return added, removed, false, "SPAWN_FAILED"
+		end
+		added += 1
+	end
+	for _ = currentSeekers + 1, population.Seekers do
+		local callSucceeded, spawned = pcall(spawnNpc, ROLE_SEEKER)
+		if not callSucceeded or not spawned then
+			if not callSucceeded then
+				warn(`RoundManager: exact Hunter spawn failed: {tostring(spawned)}`)
+			end
+			updateRoleCounts()
+			return added, removed, false, "SPAWN_FAILED"
+		end
+		added += 1
+	end
+
+	-- Remove old-role excess only after every required clone succeeded. If a
+	-- clone fails, rollback only has to delete newly added NPCs and never needs
+	-- to recreate an NPC that was already present before this request.
+	if currentHiders > population.Hiders then
+		removed += removeManagedNpcs(ROLE_HIDER, currentHiders - population.Hiders)
+	end
+	if currentSeekers > population.Seekers then
+		removed += removeManagedNpcs(ROLE_SEEKER, currentSeekers - population.Seekers)
+	end
+
+	updateRoleCounts()
+	local finalHiders, finalSeekers = getNpcRoleCounts()
+	if finalHiders ~= population.Hiders or finalSeekers ~= population.Seekers then
+		return added, removed, false, "REMOVE_FAILED"
+	end
+	return added, removed, true, nil
+end
+
+local function applyAdminNpcPopulation(
+	hiderTarget: number,
+	seekerTarget: number
+): (boolean, {[string]: any}, string?)
+	if hiderTarget % 1 ~= 0
+		or seekerTarget % 1 ~= 0
+		or hiderTarget < 0
+		or seekerTarget < 0
+		or hiderTarget + seekerTarget > MAX_ACTIVE_NPCS then
+		return false, {}, "INVALID_POPULATION"
+	end
+
+	local previous = adminNpcPopulation
+	local originalHiders, originalSeekers = getNpcRoleCounts()
+	adminNpcPopulation = {
+		Hiders = hiderTarget,
+		Seekers = seekerTarget,
+	}
+	publishAdminNpcPopulation()
+
+	local added, removed, completed, problem = reconcileAdminNpcPopulation()
+	local deferred = problem == "NO_ACTIVE_ARENA" or problem == "PARTICIPANTS_NOT_READY"
+	if not completed and not deferred then
+		-- Rebuild the exact pre-request live composition first, then restore the
+		-- previous policy. This keeps a rare partial clone failure transactional.
+		adminNpcPopulation = {
+			Hiders = originalHiders,
+			Seekers = originalSeekers,
+		}
+		local _, _, rollbackCompleted, rollbackProblem = reconcileAdminNpcPopulation()
+		adminNpcPopulation = previous
+		publishAdminNpcPopulation()
+		if not rollbackCompleted then
+			warn(`RoundManager: exact NPC rollback failed: {tostring(rollbackProblem)}`)
+		end
+		return false, {
+			Added = added,
+			Removed = removed,
+			RollbackCompleted = rollbackCompleted,
+		}, problem
+	end
+
+	return true, {
+		Added = added,
+		Removed = removed,
+		Deferred = deferred,
+		HiderTarget = hiderTarget,
+		SeekerTarget = seekerTarget,
+	}, nil
+end
+
+local function fillNpcSlots(): (number, boolean)
+	local phase = roundState:GetAttribute("Phase")
+	if phase == PHASE_STARTING
+		and not preparingRoundParticipants
+		and not startingParticipantsAssigned then
+		return 0, false
+	end
+	if adminNpcPopulation then
+		local added, _, completed = reconcileAdminNpcPopulation()
+		return added, completed
+	end
+
+	local before = getManagedNpcCount()
+	local spawnFailed = false
+	while getManagedNpcCount() < MAX_ACTIVE_NPCS do
+		local role = chooseNpcRole()
+		if not role then
+			break
+		end
+		if not spawnNpc(role) then
+			spawnFailed = true
+			break
+		end
+	end
+	updateRoleCounts()
+	return getManagedNpcCount() - before, not spawnFailed
+end
+
+local function assignRoles(): boolean
 	local players = Players:GetPlayers()
 	shufflePlayers(players)
 
@@ -846,23 +1152,25 @@ local function assignRoles()
 			setPlayerRole(players[index], ROLE_HIDER, index)
 		end
 	else
-		local roleSlots: {string} = {}
-		for _ = 1, MAX_HIDERS do
-			table.insert(roleSlots, ROLE_HIDER)
-		end
-		for _ = 1, MAX_SEEKERS do
-			table.insert(roleSlots, ROLE_SEEKER)
-		end
-		shuffleRoles(roleSlots)
-
-		local participantCount = math.min(#players, #roleSlots)
+		-- Decide independently whether this round's Seeker is human or an NPC.
+		-- Players were shuffled above, so a human Seeker is random as well.
+		local playerSeekerCount = if #players > 0
+			and random:NextNumber() < PLAYER_SEEKER_CHANCE
+			then math.min(#players, MAX_SEEKERS)
+			else 0
+		local participantCount = math.min(#players, MAX_HIDERS + playerSeekerCount)
 		for index = 1, participantCount do
-			setPlayerRole(players[index], roleSlots[index], index)
+			setPlayerRole(
+				players[index],
+				if index <= playerSeekerCount then ROLE_SEEKER else ROLE_HIDER,
+				index
+			)
 		end
 	end
-	fillNpcSlots()
+	local _, populationCompleted = fillNpcSlots()
 
 	updateRoleCounts()
+	return populationCompleted
 end
 
 local function setPhase(phase: string, durationSeconds: number)
@@ -883,7 +1191,8 @@ local function runTimedPhase(phase: string, durationSeconds: number, requirePlay
 		if requirePlayers and #Players:GetPlayers() < MINIMUM_PLAYERS then
 			return false
 		end
-		if (phase == PHASE_STARTING or phase == PHASE_ROUND) and not activeArenaIsAvailable() then
+		if (phase == PHASE_PREPARING or phase == PHASE_STARTING or phase == PHASE_ROUND)
+			and not activeArenaIsAvailable() then
 			warn("RoundManager: the active SpawnArena was removed; returning everyone to the hub")
 			return false
 		end
@@ -894,7 +1203,8 @@ local function runTimedPhase(phase: string, durationSeconds: number, requirePlay
 		end
 		if restartRoundRequested
 			or endRoundRequested
-			or (skipCountdownRequested and (phase == PHASE_STARTING or phase == PHASE_ENDED)) then
+			or (skipCountdownRequested
+				and (phase == PHASE_PREPARING or phase == PHASE_STARTING or phase == PHASE_ENDED)) then
 			return true
 		end
 		task.wait(0.25)
@@ -903,9 +1213,78 @@ local function runTimedPhase(phase: string, durationSeconds: number, requirePlay
 	return true
 end
 
+local function runStartingPhase(): boolean
+	setPhase(PHASE_STARTING, STARTING_DURATION_SECONDS)
+	startingParticipantsAssigned = false
+	local participantsAssigned = false
+
+	repeat
+		updateRoleCounts()
+		if #Players:GetPlayers() < MINIMUM_PLAYERS then
+			return false
+		end
+		if not activeArenaIsAvailable() then
+			warn("RoundManager: the active SpawnArena was removed; returning everyone to the hub")
+			return false
+		end
+		if restartRoundRequested or endRoundRequested then
+			return true
+		end
+
+		local remainingSeconds = phaseEndsAt - workspace:GetServerTimeNow()
+		if not participantsAssigned
+			and (remainingSeconds <= ARENA_READY_DURATION_SECONDS or skipCountdownRequested) then
+			-- Keep everyone in HUB for the first part of the same visible countdown.
+			-- Assigning roles relocates players and spawns NPCs on the arena.
+			preparingRoundParticipants = true
+			local assigned = assignRoles()
+			preparingRoundParticipants = false
+			if not assigned then
+				warn("RoundManager: NPC population assignment failed; cancelling this round start")
+				return false
+			end
+			participantsAssigned = true
+			startingParticipantsAssigned = true
+		end
+
+		if skipCountdownRequested then
+			return true
+		end
+		task.wait(0.25)
+	until workspace:GetServerTimeNow() >= phaseEndsAt
+
+	-- This only matters if an administrator shortened the phase between ticks.
+	if not participantsAssigned then
+		preparingRoundParticipants = true
+		local assigned = assignRoles()
+		preparingRoundParticipants = false
+		if not assigned then
+			warn("RoundManager: NPC population assignment failed; cancelling this round start")
+			return false
+		end
+		startingParticipantsAssigned = true
+	end
+	return true
+end
+
 local function replaceNpcWithPlayer(player: Player): boolean
-	if roundState:GetAttribute("Phase") ~= PHASE_STARTING then
+	local phase = roundState:GetAttribute("Phase")
+	if phase ~= PHASE_PREPARING and phase ~= PHASE_STARTING then
 		return false
+	end
+	if adminNpcPopulation then
+		-- Keep the exact NPC target untouched while still admitting a late human
+		-- participant into an available Hider player slot.
+		if not startingParticipantsAssigned then
+			return false
+		end
+		local playerHiders = select(1, getPlayerRoleCounts())
+		if playerHiders >= MAX_HIDERS then
+			return false
+		end
+		setPlayerRole(player, ROLE_HIDER)
+		updateRoleCounts()
+		return true
 	end
 
 	for _, child in ipairs(npcFolder:GetChildren()) do
@@ -940,7 +1319,6 @@ local function setupPlayer(player: Player)
 			if player.Character == character then
 				applyPlayerRoleScale(player)
 				relocatePlayerForCurrentState(player)
-				SeekerCaptureService.Reapply(player)
 				refreshPlayerRoundState(player)
 			end
 		end)
@@ -974,21 +1352,22 @@ Players.PlayerAdded:Connect(setupPlayer)
 
 Players.PlayerRemoving:Connect(function(player)
 	local departingRole = player:GetAttribute("RoundRole")
-	local wasCaged = SeekerCaptureService.IsCaged(player)
 	local departurePhase = roundState:GetAttribute("Phase")
-	local shouldReplace = not wasCaged
-		and (departingRole == ROLE_HIDER or departingRole == ROLE_SEEKER)
-		and (departurePhase == PHASE_STARTING or departurePhase == PHASE_ROUND)
+	local shouldReplace = (departingRole == ROLE_HIDER or departingRole == ROLE_SEEKER)
+		and (departurePhase == PHASE_PREPARING
+			or departurePhase == PHASE_STARTING
+			or departurePhase == PHASE_ROUND)
 	if shouldReplace and departingRole == ROLE_HIDER then
 		pendingHiderReplacements += 1
-	elseif wasCaged and departingRole == ROLE_HIDER and departurePhase == PHASE_ROUND then
-		recordCaughtHider()
 	end
 	SeekerCaptureService.ClearOwner(player)
+	CageService.Remove(player)
 	task.spawn(function()
 		task.wait()
 		local phase = roundState:GetAttribute("Phase")
-		if shouldReplace and (phase == PHASE_STARTING or phase == PHASE_ROUND) then
+		if shouldReplace
+			and not adminNpcPopulation
+			and (phase == PHASE_PREPARING or phase == PHASE_STARTING or phase == PHASE_ROUND) then
 			spawnNpc(departingRole)
 		end
 		if shouldReplace and departingRole == ROLE_HIDER then
@@ -1002,32 +1381,18 @@ for _, player in ipairs(Players:GetPlayers()) do
 	setupPlayer(player)
 end
 
-local function getNpcRoleCounts(): (number, number)
-	local hiders = 0
-	local seekers = 0
-	for _, npc in ipairs(npcFolder:GetChildren()) do
-		if npc:IsA("Model") and npc:GetAttribute(MANAGED_NPC_ATTRIBUTE) == true then
-			local role = npc:GetAttribute("RoundRole")
-			if role == ROLE_HIDER then
-				hiders += 1
-			elseif role == ROLE_SEEKER then
-				seekers += 1
-			end
-		end
-	end
-	return hiders, seekers
-end
-
 local function captureNpcAsCaught(npc: Model)
 	if npc.Parent ~= npcFolder
 		or npc:GetAttribute(MANAGED_NPC_ATTRIBUTE) ~= true
 		or npc:GetAttribute("RoundRole") ~= ROLE_HIDER then
 		return
 	end
-
 	SeekerCaptureService.ClearOwner(npc)
+	CageService.Remove(npc)
+	HiderEvidenceService.Clear(npc)
 	HiderService.Stop(npc)
 	recordCaughtHider()
+	npc:SetAttribute(ROUND_CAUGHT_ATTRIBUTE, true)
 	npc:SetAttribute(ROUND_SPAWN_SLOT_ATTRIBUTE, nil)
 	RoundCharacterState.Clear(npc)
 	npc:Destroy()
@@ -1036,16 +1401,15 @@ end
 
 SeekerCaptureService.Start({
 	CapturePlayer = function(player: Player)
-		if player.Parent == Players and player:GetAttribute("RoundRole") == ROLE_HIDER then
+		if roundState:GetAttribute("Phase") == PHASE_ROUND
+			and player.Parent == Players
+			and player:GetAttribute("RoundRole") == ROLE_HIDER then
 			recordCaughtHider()
 			setSpectator(player, true)
 			updateRoleCounts()
 		end
 	end,
 	CaptureNpc = captureNpcAsCaught,
-	SetNpcCaged = function(npc: Model, caged: boolean)
-		HiderService.SetCaged(npc, caged)
-	end,
 })
 
 local function validateControlTarget(arguments: {[string]: any}): Player?
@@ -1078,6 +1442,10 @@ RoundControl.Register(function(action: string, arguments: {[string]: any}): (boo
 			NpcHiderCount = npcHiders,
 			NpcSeekerCount = npcSeekers,
 			NpcAIEnabled = HiderService.IsAdminEnabled(),
+			NpcPopulationOverrideEnabled = adminNpcPopulation ~= nil,
+			NpcTargetHiders = if adminNpcPopulation then adminNpcPopulation.Hiders else 0,
+			NpcTargetSeekers = if adminNpcPopulation then adminNpcPopulation.Seekers else 0,
+			MaxAdminNpcs = MAX_ACTIVE_NPCS,
 		}
 	end
 
@@ -1089,23 +1457,49 @@ RoundControl.Register(function(action: string, arguments: {[string]: any}): (boo
 			return false, "Invalid player or role.", nil
 		end
 		if BOT_SEEKER_MODE and role == ROLE_SEEKER then
-			return false, "Bot Seeker mode does not allow a player Seeker.", nil
+			return false, "Player Hunters are disabled while NPC Hunter mode is active.", nil
+		end
+		local phase = roundState:GetAttribute("Phase")
+		if phase == PHASE_STARTING and not startingParticipantsAssigned then
+			return false, "Player roles can be changed after the arena participants are assigned.", nil
 		end
 		local currentRole = target:GetAttribute("RoundRole")
+		if currentRole == role then
+			return true, `{target.Name} is already a {role}.`, nil
+		end
 		if currentRole ~= role and role ~= ROLE_SPECTATOR then
-			local hiderCount, seekerCount = getRoleCounts()
-			local destinationIsFull = (role == ROLE_HIDER and hiderCount + caughtHiderCount >= MAX_HIDERS)
-				or (role == ROLE_SEEKER and seekerCount >= MAX_SEEKERS)
-			if destinationIsFull and removeManagedNpcs(role, 1) == 0 then
-				return false, `The {role} player slots are already full.`, nil
+			if adminNpcPopulation then
+				local playerHiders, playerSeekers = getPlayerRoleCounts()
+				local playerRoleIsFull = (role == ROLE_HIDER and playerHiders >= MAX_HIDERS)
+					or (role == ROLE_SEEKER and playerSeekers >= MAX_SEEKERS)
+				if playerRoleIsFull then
+					return false, `The player {role} slots are already full.`, nil
+				end
+			else
+				local hiderCount, seekerCount = getRoleCounts()
+				local destinationIsFull = (role == ROLE_HIDER and hiderCount + caughtHiderCount >= MAX_HIDERS)
+					or (role == ROLE_SEEKER and seekerCount >= MAX_SEEKERS)
+				if destinationIsFull and removeManagedNpcs(role, 1) == 0 then
+					return false, `The {role} player slots are already full.`, nil
+				end
 			end
 		end
 		if role == ROLE_SPECTATOR then
 			setSpectator(target)
 		else
+			if target:GetAttribute(ROUND_CAUGHT_ATTRIBUTE) == true then
+				caughtHiderCount = math.max(0, caughtHiderCount - 1)
+				roundState:SetAttribute("CaughtHiderCount", caughtHiderCount)
+			end
 			setPlayerRole(target, role)
 		end
-		trimNpcRoleOverflow()
+		if not adminNpcPopulation then
+			trimNpcRoleOverflow()
+			local phase = roundState:GetAttribute("Phase")
+			if phase == PHASE_ROUND or getManagedNpcCount() > 0 then
+				fillNpcSlots()
+			end
+		end
 		updateRoleCounts()
 		return true, `{target.Name} is now a {role}.`, nil
 	end
@@ -1117,7 +1511,10 @@ RoundControl.Register(function(action: string, arguments: {[string]: any}): (boo
 		end
 		applyPlayerRoleScale(target)
 		refreshPlayerRoundState(target)
-		return true, `{target.Name}'s movement was normalized to {WALK_SPEED}.`, nil
+		local targetWalkSpeed = if target:GetAttribute("RoundRole") == ROLE_SEEKER
+			then SEEKER_WALK_SPEED
+			else WALK_SPEED
+		return true, `{target.Name}'s movement was normalized to {targetWalkSpeed}.`, nil
 	end
 
 	if action == "StartRoundNow" then
@@ -1127,7 +1524,7 @@ RoundControl.Register(function(action: string, arguments: {[string]: any}): (boo
 		end
 		skipCountdownRequested = true
 		endRoundRequested = false
-		if phase == PHASE_STARTING or phase == PHASE_ENDED then
+		if phase == PHASE_PREPARING or phase == PHASE_STARTING or phase == PHASE_ENDED then
 			setPhaseEndNow()
 		end
 		return true, "The active countdown will be skipped.", nil
@@ -1161,7 +1558,10 @@ RoundControl.Register(function(action: string, arguments: {[string]: any}): (boo
 		if type(seconds) ~= "number" or seconds % 1 ~= 0 or seconds < 1 or seconds > 600 then
 			return false, "Time must be a whole number from 1 to 600.", nil
 		end
-		if phase ~= PHASE_STARTING and phase ~= PHASE_ROUND and phase ~= PHASE_ENDED then
+		if phase ~= PHASE_PREPARING
+			and phase ~= PHASE_STARTING
+			and phase ~= PHASE_ROUND
+			and phase ~= PHASE_ENDED then
 			return false, "The current phase does not have a timer.", nil
 		end
 		phaseEndsAt = workspace:GetServerTimeNow() + seconds
@@ -1169,18 +1569,86 @@ RoundControl.Register(function(action: string, arguments: {[string]: any}): (boo
 		return true, `The current phase now has {seconds} second(s) remaining.`, nil
 	end
 
+	if action == "SetNpcPopulation" then
+		local hiderTarget = arguments.HiderCount
+		local seekerTarget = arguments.SeekerCount
+		if type(hiderTarget) ~= "number"
+			or type(seekerTarget) ~= "number"
+			or hiderTarget % 1 ~= 0
+			or seekerTarget % 1 ~= 0
+			or hiderTarget < 0
+			or seekerTarget < 0
+			or hiderTarget + seekerTarget > MAX_ACTIVE_NPCS then
+			return false, `NPC counts must be whole numbers with a combined maximum of {MAX_ACTIVE_NPCS}.`, nil
+		end
+		local applied, data, problem = applyAdminNpcPopulation(hiderTarget, seekerTarget)
+		if not applied then
+			local message = if problem == "INVALID_HIDER_TEMPLATE"
+				then "The Hider NPC template is invalid."
+				elseif problem == "INVALID_SEEKER_TEMPLATE"
+					then "ServerStorage.HunterCharacter is invalid."
+					else "The exact NPC population could not be applied."
+			return false, message, data
+		end
+		local message = if data.Deferred == true
+			then `Saved exact NPC population: {hiderTarget} Hider(s), {seekerTarget} Hunter(s). It will apply when the arena is ready.`
+			else `Exact NPC population applied: {hiderTarget} Hider(s), {seekerTarget} Hunter(s).`
+		return true, message, data
+	end
+
+	if action == "ClearNpcPopulationOverride" then
+		if not adminNpcPopulation then
+			return true, "NPC population is already automatic.", nil
+		end
+		adminNpcPopulation = nil
+		publishAdminNpcPopulation()
+		trimNpcRoleOverflow()
+		local phase = roundState:GetAttribute("Phase")
+		local added = 0
+		local completed = true
+		if phase == PHASE_PREPARING or phase == PHASE_STARTING or phase == PHASE_ROUND then
+			added, completed = fillNpcSlots()
+		else
+			updateRoleCounts()
+		end
+		if not completed then
+			return true, "Automatic population was restored; some NPC slots could not be filled yet.", {
+				Added = added,
+				Completed = false,
+			}
+		end
+		return true, "Automatic NPC population restored.", {
+			Added = added,
+			Completed = true,
+		}
+	end
+
 	if action == "FillNpcSlots" then
+		local phase = roundState:GetAttribute("Phase")
+		if phase == PHASE_STARTING and not startingParticipantsAssigned then
+			return false, "NPCs will be assigned during the final arena countdown.", nil
+		end
 		local added, completed = fillNpcSlots()
 		if not completed then
-			return false, "NPC filling requires an active SpawnArena and a valid StarterCharacter.", nil
+			return false, "NPC filling requires an active SpawnArena and valid NPC character templates.", nil
 		end
-		return true, `Filled all available NPC slots; added {added} NPC(s).`, { Added = added }
+		local message = if adminNpcPopulation
+			then `Reapplied the exact NPC population; added {added} NPC(s).`
+			else `Filled all available NPC slots; added {added} NPC(s).`
+		return true, message, { Added = added }
 	end
 
 	if action == "ClearNpcs" then
+		if adminNpcPopulation then
+			local applied, data = applyAdminNpcPopulation(0, 0)
+			if not applied then
+				return false, "The exact NPC population could not be cleared.", data
+			end
+			return true, "Cleared all managed NPCs and set the exact targets to zero.", data
+		end
 		local phase = roundState:GetAttribute("Phase")
 		local preserveBotSeeker = BOT_SEEKER_MODE
-			and (phase == PHASE_STARTING or phase == PHASE_ROUND)
+			and (phase == PHASE_PREPARING or phase == PHASE_STARTING or phase == PHASE_ROUND)
 		local removed = if preserveBotSeeker
 			then removeManagedNpcs(ROLE_HIDER)
 			else getManagedNpcCount()
@@ -1198,6 +1666,27 @@ RoundControl.Register(function(action: string, arguments: {[string]: any}): (boo
 		local role = arguments.Role
 		if role ~= ROLE_HIDER and role ~= ROLE_SEEKER then
 			return false, "Invalid NPC role.", nil
+		end
+		if adminNpcPopulation then
+			local hiderTarget = adminNpcPopulation.Hiders + (if role == ROLE_HIDER then 1 else 0)
+			local seekerTarget = adminNpcPopulation.Seekers + (if role == ROLE_SEEKER then 1 else 0)
+			local applied, data, problem = applyAdminNpcPopulation(hiderTarget, seekerTarget)
+			if not applied then
+				local message = if problem == "INVALID_HIDER_TEMPLATE"
+					then "The Hider NPC template is invalid."
+					elseif problem == "INVALID_SEEKER_TEMPLATE"
+						then "ServerStorage.HunterCharacter is invalid."
+						else `The exact population allows at most {MAX_ACTIVE_NPCS} managed NPCs.`
+				return false, message, data
+			end
+			local message = if data.Deferred == true
+				then `Queued one NPC {role}; it will spawn when the arena is ready.`
+				else `Added one NPC {role} to the exact population.`
+			return true, message, data
+		end
+		local phase = roundState:GetAttribute("Phase")
+		if phase == PHASE_STARTING and not startingParticipantsAssigned then
+			return false, "NPCs can be spawned after the arena participants are assigned.", nil
 		end
 		local hiderCount, seekerCount = getRoleCounts()
 		local roleIsFull = (role == ROLE_HIDER and hiderCount + caughtHiderCount >= MAX_HIDERS)
@@ -1217,10 +1706,19 @@ RoundControl.Register(function(action: string, arguments: {[string]: any}): (boo
 		if role ~= ROLE_HIDER and role ~= ROLE_SEEKER then
 			return false, "Invalid NPC role.", nil
 		end
+		if adminNpcPopulation then
+			local hiderTarget = if role == ROLE_HIDER then 0 else adminNpcPopulation.Hiders
+			local seekerTarget = if role == ROLE_SEEKER then 0 else adminNpcPopulation.Seekers
+			local applied, data = applyAdminNpcPopulation(hiderTarget, seekerTarget)
+			if not applied then
+				return false, `NPC {role}s could not be removed.`, data
+			end
+			return true, `Removed all NPC {role}s from the exact population.`, data
+		end
 		local phase = roundState:GetAttribute("Phase")
 		if BOT_SEEKER_MODE
 			and role == ROLE_SEEKER
-			and (phase == PHASE_STARTING or phase == PHASE_ROUND) then
+			and (phase == PHASE_PREPARING or phase == PHASE_STARTING or phase == PHASE_ROUND) then
 			return false, "The bot Seeker is required while the round is active.", nil
 		end
 		local removed = removeManagedNpcs(role)
@@ -1260,20 +1758,13 @@ while true do
 		continue
 	end
 
-	preparingRoundParticipants = true
-	assignRoles()
-	preparingRoundParticipants = false
-	if skipCountdownRequested then
-		skipCountdownRequested = false
-	else
-		if not runTimedPhase(PHASE_STARTING, STARTING_DURATION_SECONDS, true) then
-			continue
-		end
-		if restartRoundRequested then
-			continue
-		end
-		skipCountdownRequested = false
+	if not runStartingPhase() then
+		continue
 	end
+	if restartRoundRequested then
+		continue
+	end
+	skipCountdownRequested = false
 
 	if not endRoundRequested then
 		if not runTimedPhase(PHASE_ROUND, ROUND_DURATION_SECONDS, true) then
@@ -1285,6 +1776,6 @@ while true do
 	end
 
 	endRoundRequested = false
+	setPhase(PHASE_ENDED, 0)
 	resetRoles(true)
-	runTimedPhase(PHASE_ENDED, ROUND_END_DURATION_SECONDS, false)
 end

@@ -476,7 +476,7 @@ local playerStatusLabel = addLabel(
 playerStatusLabel.TextWrapped = true
 playerStatusLabel.TextYAlignment = Enum.TextYAlignment.Top
 
-local roundStatusCard = makeCard(pages.Overview, "Round Status", nil, 132, 3)
+local roundStatusCard = makeCard(pages.Overview, "Round Status", nil, 158, 3)
 local roundStatusLabel = addLabel(
 	roundStatusCard,
 	"Round state unavailable.",
@@ -559,7 +559,7 @@ local hiderButton = makeButton(
 )
 local seekerButton = makeButton(
 	roleCard,
-	"Seeker",
+	"Hunter",
 	COLORS.orange,
 	UDim2.new(1 / 3, 4, 0, 76),
 	UDim2.new(1 / 3, -14, 0, 42)
@@ -658,14 +658,14 @@ local setTimeButton = makeButton(
 
 makeHeading(
 	pages.NPC,
-	"NPC",
-	"Manage server-owned round NPCs and their AI.",
+	"NPC & Hunters",
+	"Manage server-owned characters. Hunter is the player-facing name for the Seeker role.",
 	1
 )
 local npcPopulationCard = makeCard(
 	pages.NPC,
-	"Population",
-	"Fill empty round slots, clear all NPCs, or manage one role.",
+	"Quick Population Tools",
+	"Automatic mode uses normal round limits. Role-clearing buttons remove that whole NPC role.",
 	190,
 	2
 )
@@ -678,45 +678,105 @@ local fillNpcsButton = makeButton(
 )
 local clearNpcsButton = makeButton(
 	npcPopulationCard,
-	"Clear All NPCs",
+	"Clear NPCs Safely",
 	COLORS.red,
 	UDim2.new(0.5, 6, 0, 76),
 	UDim2.new(0.5, -22, 0, 42)
 )
 local spawnHiderButton = makeButton(
 	npcPopulationCard,
-	"Spawn Hider",
+	"+1 Hider",
 	COLORS.green,
 	UDim2.new(0, 16, 0, 132),
 	UDim2.new(0.25, -19, 0, 40)
 )
 local removeHidersButton = makeButton(
 	npcPopulationCard,
-	"Remove Hiders",
+	"Clear Hiders",
 	Color3.fromRGB(122, 72, 79),
 	UDim2.new(0.25, 5, 0, 132),
 	UDim2.new(0.25, -14, 0, 40)
 )
 local spawnSeekerButton = makeButton(
 	npcPopulationCard,
-	"Spawn Seeker",
+	"+1 Hunter",
 	COLORS.orange,
 	UDim2.new(0.5, 4, 0, 132),
 	UDim2.new(0.25, -14, 0, 40)
 )
 local removeSeekersButton = makeButton(
 	npcPopulationCard,
-	"Remove Seekers",
+	"Clear Hunters",
 	Color3.fromRGB(122, 72, 79),
 	UDim2.new(0.75, 3, 0, 132),
 	UDim2.new(0.25, -19, 0, 40)
+)
+local exactPopulationCard = makeCard(
+	pages.NPC,
+	"Exact NPC Composition",
+	"Persists across rounds for this server session. The server enforces the combined limit.",
+	256,
+	3
+)
+addLabel(
+	exactPopulationCard,
+	"HIDERS",
+	UDim2.fromOffset(16, 68),
+	UDim2.new(0.5, -22, 0, 18),
+	Enum.Font.GothamBold,
+	9,
+	COLORS.muted
+)
+addLabel(
+	exactPopulationCard,
+	"HUNTERS",
+	UDim2.new(0.5, 6, 0, 68),
+	UDim2.new(0.5, -22, 0, 18),
+	Enum.Font.GothamBold,
+	9,
+	COLORS.muted
+)
+local npcHiderCountInput = makeInput(
+	exactPopulationCard,
+	"Hider count",
+	UDim2.fromOffset(16, 88),
+	UDim2.new(0.5, -22, 0, 40)
+)
+npcHiderCountInput.Text = "0"
+local npcHunterCountInput = makeInput(
+	exactPopulationCard,
+	"Hunter count",
+	UDim2.new(0.5, 6, 0, 88),
+	UDim2.new(0.5, -22, 0, 40)
+)
+npcHunterCountInput.Text = "1"
+local applyNpcPopulationButton = makeButton(
+	exactPopulationCard,
+	"Apply Exact Counts",
+	COLORS.accent,
+	UDim2.fromOffset(16, 142),
+	UDim2.new(0.5, -22, 0, 42)
+)
+local onlyHuntersButton = makeButton(
+	exactPopulationCard,
+	"Only Hunters",
+	COLORS.orange,
+	UDim2.new(0.5, 6, 0, 142),
+	UDim2.new(0.5, -22, 0, 42)
+)
+local automaticNpcPopulationButton = makeButton(
+	exactPopulationCard,
+	"Restore Automatic Population",
+	COLORS.blue,
+	UDim2.fromOffset(16, 198),
+	UDim2.new(1, -32, 0, 42)
 )
 local npcAiCard = makeCard(
 	pages.NPC,
 	"Artificial Intelligence",
 	"Pause or resume navigation for every managed round NPC.",
 	136,
-	3
+	4
 )
 local enableAiButton = makeButton(
 	npcAiCard,
@@ -754,6 +814,9 @@ local requestButtons = {
 	removeHidersButton,
 	spawnSeekerButton,
 	removeSeekersButton,
+	applyNpcPopulationButton,
+	onlyHuntersButton,
+	automaticNpcPopulationButton,
 	enableAiButton,
 	disableAiButton,
 }
@@ -762,6 +825,14 @@ local snapshot = nil
 local requestBusy = false
 local mobileLayout = false
 local requestSequence = 0
+
+local function updateHunterRoleButton()
+	local round = if type(snapshot) == "table" then snapshot.Round else nil
+	local locked = type(round) == "table" and round.BotSeekerMode == true
+	seekerButton.Interactable = not requestBusy and not locked
+	seekerButton.Active = not requestBusy and not locked
+	seekerButton.TextTransparency = if requestBusy or locked then 0.42 else 0
+end
 
 local function setStatus(message, color)
 	statusLabel.Text = message
@@ -776,6 +847,7 @@ local function setBusy(isBusy)
 		button.Active = not isBusy
 		button.TextTransparency = if isBusy then 0.42 else 0
 	end
+	updateHunterRoleButton()
 end
 
 local function updateSnapshot(nextSnapshot)
@@ -784,6 +856,7 @@ local function updateSnapshot(nextSnapshot)
 		targetSummary.Text = "No target snapshot loaded."
 		playerStatusLabel.Text = "No snapshot loaded."
 		roundStatusLabel.Text = "Round state unavailable."
+		updateHunterRoleButton()
 		return
 	end
 
@@ -810,10 +883,9 @@ local function updateSnapshot(nextSnapshot)
 	end
 
 	local aliveText = if snapshot.CharacterAlive then "Alive" else "No living character"
-	playerStatusLabel.Text = ("%s  ·  Team: %s  ·  Caged: %s\nHealth: %s / %s  ·  Speed: %s  ·  Scale: %.2f\nCoins: %s"):format(
+	playerStatusLabel.Text = ("%s  ·  Team: %s\nHealth: %s / %s  ·  Speed: %s  ·  Scale: %.2f\nCoins: %s"):format(
 		aliveText,
 		tostring(snapshot.Team or "None"),
-		if snapshot.SearchCaged then (`Yes ({formatInteger(snapshot.CagedRemaining)}s)`) else "No",
 		formatInteger(snapshot.Health),
 		formatInteger(snapshot.MaxHealth),
 		tostring(snapshot.WalkSpeed or 0),
@@ -823,23 +895,42 @@ local function updateSnapshot(nextSnapshot)
 
 	local round = snapshot.Round
 	if type(round) == "table" then
-		roundStatusLabel.Text = ("Phase: %s  ·  Remaining: %ss  ·  Arena: %s\nParticipants: %s/%s Hiders (%s caught)  ·  %s/%s Seekers\nNPCs: %s total (%s Hiders, %s Seekers)  ·  AI: %s"):format(
+		local exactPopulation = round.NpcPopulationOverrideEnabled == true
+		local populationText = if exactPopulation
+			then ("Exact: %s Hider / %s Hunter target"):format(
+				formatInteger(round.NpcTargetHiders),
+				formatInteger(round.NpcTargetSeekers)
+			)
+			else "Automatic"
+		roundStatusLabel.Text = ("Phase: %s  ·  Remaining: %ss  ·  Arena: %s\nRoles: %s Hiders (%s caught)  ·  %s Hunters\nNPCs: %s/%s total (%s Hiders, %s Hunters)\nPopulation: %s  ·  AI: %s  ·  NPC Hunter mode: %s"):format(
 			tostring(round.Phase or "Unavailable"),
 			formatInteger(round.RemainingTime),
 			tostring(round.ActiveArena or "None"),
 			formatInteger(round.HiderCount),
-			formatInteger(round.MaxHiders),
 			formatInteger(round.CaughtHiderCount),
 			formatInteger(round.SeekerCount),
-			formatInteger(round.MaxSeekers),
 			formatInteger(round.NpcCount),
+			formatInteger(round.MaxAdminNpcs),
 			formatInteger(round.HiderNpcCount),
 			formatInteger(round.SeekerNpcCount),
-			if round.NpcAIEnabled == false then "Paused" else "Running"
+			populationText,
+			if round.NpcAIEnabled == false then "Paused" else "Running",
+			if round.BotSeekerMode == true then "On" else "Off"
 		)
+		if not npcHiderCountInput:IsFocused() then
+			npcHiderCountInput.Text = tostring(if exactPopulation
+				then math.floor(tonumber(round.NpcTargetHiders) or 0)
+				else math.floor(tonumber(round.HiderNpcCount) or 0))
+		end
+		if not npcHunterCountInput:IsFocused() then
+			npcHunterCountInput.Text = tostring(if exactPopulation
+				then math.floor(tonumber(round.NpcTargetSeekers) or 0)
+				else math.floor(tonumber(round.SeekerNpcCount) or 0))
+		end
 	else
 		roundStatusLabel.Text = "Round state unavailable."
 	end
+	updateHunterRoleButton()
 end
 
 local function sendRequest(action, fields)
@@ -878,6 +969,11 @@ local function sendRequest(action, fields)
 		end
 		if type(result.Snapshot) == "table" then
 			updateSnapshot(result.Snapshot)
+		elseif snapshot and type(result.Data) == "table" and type(result.Data.Round) == "table" then
+			-- Global round/NPC actions return round-only data, so the selected
+			-- player's card cannot accidentally switch back to the admin.
+			snapshot.Round = result.Data.Round
+			updateSnapshot(snapshot)
 		end
 		setStatus(
 			tostring(result.Message or "Request completed."),
@@ -902,6 +998,11 @@ local function setPanelVisible(visible)
 	launcher.Visible = not visible
 	if visible then
 		setStatus("Ready", COLORS.muted)
+		task.defer(function()
+			if overlay.Visible and not requestBusy then
+				sendRequest("GetSnapshot")
+			end
+		end)
 	end
 end
 
@@ -915,6 +1016,7 @@ local function applyResponsiveLayout()
 		launcher.Position = UDim2.new(1, -112, 1, -54)
 		launcher.Size = UDim2.fromOffset(100, 42)
 		panel.Size = UDim2.new(1, -10, 1, -10)
+		panel.Position = UDim2.fromScale(0.5, 0.5)
 		panelConstraint.MinSize = Vector2.new(300, 420)
 		panelConstraint.MaxSize = Vector2.new(2000, 2000)
 		header.Size = UDim2.new(1, 0, 0, 58)
@@ -952,6 +1054,17 @@ local function applyResponsiveLayout()
 
 		content.Position = UDim2.fromOffset(0, 198)
 		content.Size = UDim2.new(1, 0, 1, -198)
+
+		roundStatusCard.Size = UDim2.new(1, 0, 0, 220)
+		npcPopulationCard.Size = UDim2.new(1, 0, 0, 246)
+		spawnHiderButton.Position = UDim2.fromOffset(16, 132)
+		spawnHiderButton.Size = UDim2.new(0.5, -22, 0, 40)
+		removeHidersButton.Position = UDim2.new(0.5, 6, 0, 132)
+		removeHidersButton.Size = UDim2.new(0.5, -22, 0, 40)
+		spawnSeekerButton.Position = UDim2.fromOffset(16, 184)
+		spawnSeekerButton.Size = UDim2.new(0.5, -22, 0, 40)
+		removeSeekersButton.Position = UDim2.new(0.5, 6, 0, 184)
+		removeSeekersButton.Size = UDim2.new(0.5, -22, 0, 40)
 	else
 		screenGui.IgnoreGuiInset = true
 		launcher.Text = "ADMIN  ·  F2"
@@ -995,6 +1108,17 @@ local function applyResponsiveLayout()
 
 		content.Position = UDim2.fromOffset(170, 144)
 		content.Size = UDim2.new(1, -170, 1, -144)
+
+		roundStatusCard.Size = UDim2.new(1, 0, 0, 158)
+		npcPopulationCard.Size = UDim2.new(1, 0, 0, 190)
+		spawnHiderButton.Position = UDim2.new(0, 16, 0, 132)
+		spawnHiderButton.Size = UDim2.new(0.25, -19, 0, 40)
+		removeHidersButton.Position = UDim2.new(0.25, 5, 0, 132)
+		removeHidersButton.Size = UDim2.new(0.25, -14, 0, 40)
+		spawnSeekerButton.Position = UDim2.new(0.5, 4, 0, 132)
+		spawnSeekerButton.Size = UDim2.new(0.25, -14, 0, 40)
+		removeSeekersButton.Position = UDim2.new(0.75, 3, 0, 132)
+		removeSeekersButton.Size = UDim2.new(0.25, -19, 0, 40)
 	end
 	updateSnapshot(snapshot)
 end
@@ -1011,15 +1135,49 @@ for _, name in navOrder do
 	end)
 end
 
+local function bindConfirmedAction(button, callback, captureValue)
+	local normalText = button.Text
+	local confirmationExpiresAt = 0
+	local pendingValue = nil
+	button.Activated:Connect(function()
+		local now = os.clock()
+		if now <= confirmationExpiresAt then
+			confirmationExpiresAt = 0
+			button.Text = normalText
+			local confirmedValue = pendingValue
+			pendingValue = nil
+			callback(confirmedValue)
+			return
+		end
+		confirmationExpiresAt = now + 3
+		pendingValue = if captureValue then captureValue() else nil
+		button.Text = "CONFIRM"
+		setStatus("Press the same button again within 3 seconds.", COLORS.orange)
+		task.delay(3, function()
+			if confirmationExpiresAt > 0 and os.clock() >= confirmationExpiresAt then
+				confirmationExpiresAt = 0
+				pendingValue = nil
+				button.Text = normalText
+			end
+		end)
+	end)
+end
+
 loadButton.Activated:Connect(function()
 	sendRequest("GetSnapshot")
 end)
 addCoinsButton.Activated:Connect(function()
 	sendRequest("AddCoins", { Amount = amountInput.Text })
 end)
-removeCoinsButton.Activated:Connect(function()
-	sendRequest("RemoveCoins", { Amount = amountInput.Text })
-end)
+bindConfirmedAction(
+	removeCoinsButton,
+	function(confirmedAmount)
+		sendRequest("RemoveCoins", { Amount = confirmedAmount })
+	end,
+	function()
+		return amountInput.Text
+	end
+)
 saveProfileButton.Activated:Connect(function()
 	sendRequest("SaveProfile")
 end)
@@ -1038,16 +1196,16 @@ end)
 movementButton.Activated:Connect(function()
 	sendRequest("NormalizeMovement")
 end)
-respawnButton.Activated:Connect(function()
+bindConfirmedAction(respawnButton, function()
 	sendRequest("RespawnPlayer")
 end)
 startRoundButton.Activated:Connect(function()
 	sendRequest("StartRoundNow")
 end)
-endRoundButton.Activated:Connect(function()
+bindConfirmedAction(endRoundButton, function()
 	sendRequest("EndRound")
 end)
-restartRoundButton.Activated:Connect(function()
+bindConfirmedAction(restartRoundButton, function()
 	sendRequest("RestartRound")
 end)
 setTimeButton.Activated:Connect(function()
@@ -1056,20 +1214,56 @@ end)
 fillNpcsButton.Activated:Connect(function()
 	sendRequest("FillNpcSlots")
 end)
-clearNpcsButton.Activated:Connect(function()
+bindConfirmedAction(clearNpcsButton, function()
 	sendRequest("ClearNpcs")
 end)
 spawnHiderButton.Activated:Connect(function()
 	sendRequest("SpawnNpc", { Role = "Hider" })
 end)
-removeHidersButton.Activated:Connect(function()
+bindConfirmedAction(removeHidersButton, function()
 	sendRequest("RemoveNpcs", { Role = "Hider" })
 end)
 spawnSeekerButton.Activated:Connect(function()
 	sendRequest("SpawnNpc", { Role = "Seeker" })
 end)
-removeSeekersButton.Activated:Connect(function()
+bindConfirmedAction(removeSeekersButton, function()
 	sendRequest("RemoveNpcs", { Role = "Seeker" })
+end)
+bindConfirmedAction(
+	applyNpcPopulationButton,
+	function(confirmedCounts)
+		sendRequest("SetNpcPopulation", {
+			HiderCount = confirmedCounts.Hiders,
+			SeekerCount = confirmedCounts.Hunters,
+		})
+	end,
+	function()
+		return {
+			Hiders = npcHiderCountInput.Text,
+			Hunters = npcHunterCountInput.Text,
+		}
+	end
+)
+bindConfirmedAction(
+	onlyHuntersButton,
+	function(confirmedHunterCount)
+		npcHiderCountInput.Text = "0"
+		sendRequest("SetNpcPopulation", {
+			HiderCount = "0",
+			SeekerCount = confirmedHunterCount,
+		})
+	end,
+	function()
+		local hunterCount = tonumber(npcHunterCountInput.Text)
+		if not hunterCount or hunterCount < 1 then
+			hunterCount = 1
+			npcHunterCountInput.Text = "1"
+		end
+		return tostring(hunterCount)
+	end
+)
+bindConfirmedAction(automaticNpcPopulationButton, function()
+	sendRequest("ClearNpcPopulationOverride")
 end)
 enableAiButton.Activated:Connect(function()
 	sendRequest("SetNpcAIEnabled", { Enabled = true })
@@ -1108,7 +1302,7 @@ header.InputBegan:Connect(function(input)
 end)
 
 UserInputService.InputChanged:Connect(function(input)
-	if not dragging or not dragInput or not dragStart or not panelStart then
+	if mobileLayout or not dragging or not dragInput or not dragStart or not panelStart then
 		return
 	end
 	local mouseDrag = dragInput.UserInputType == Enum.UserInputType.MouseButton1

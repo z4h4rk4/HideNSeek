@@ -11,7 +11,6 @@ local SearchGeometry = require(ReplicatedStorage:WaitForChild("SeekerSearchGeome
 local ROUND_STATE_NAME = "RoundState"
 local NPC_FOLDER_NAME = "RoundNPCs"
 local ROLE_ATTRIBUTE = "RoundRole"
-local ROLE_HIDER = "Hider"
 local ROLE_SEEKER = "Seeker"
 local PHASE_ROUND = "Round"
 local SEARCH_RAYCAST_COLLISION_GROUP = Config.RAYCAST_COLLISION_GROUP
@@ -22,12 +21,6 @@ local WALLS_CONTAINER_NAME = "Walls"
 type SearchVisual = {
 	model: Model,
 	wedges: {WedgePart},
-}
-
-type CagedVisual = {
-	model: Model,
-	billboard: BillboardGui,
-	label: TextLabel,
 }
 
 local roundState = ReplicatedStorage:WaitForChild(ROUND_STATE_NAME)
@@ -42,7 +35,6 @@ visualFolder.Archivable = false
 visualFolder.Parent = Workspace
 
 local searchVisuals: {[Model]: SearchVisual} = {}
-local cagedVisuals: {[Model]: CagedVisual} = {}
 local updateAccumulator = 0
 local lastVisualErrorAt = 0
 local wallCacheDirty = true
@@ -362,80 +354,7 @@ local function updateSearchVisual(
 	end
 end
 
-local function createCagedVisual(model: Model, rootPart: BasePart): CagedVisual
-	local billboard = Instance.new("BillboardGui")
-	billboard.Name = "CagedStatus"
-	billboard.Adornee = rootPart
-	billboard.Size = UDim2.fromOffset(190, 54)
-	billboard.StudsOffsetWorldSpace = Vector3.new(0, 4.5, 0)
-	billboard.AlwaysOnTop = false
-	billboard.LightInfluence = 0
-	billboard.MaxDistance = 80
-	billboard.Parent = visualFolder
-
-	local label = Instance.new("TextLabel")
-	label.Size = UDim2.fromScale(1, 1)
-	label.BackgroundTransparency = 1
-	label.Font = Enum.Font.GothamBlack
-	label.Text = "CAGED"
-	label.TextColor3 = Config.CAGED_COLOR
-	label.TextSize = 18
-	label.TextStrokeColor3 = Color3.fromRGB(45, 25, 5)
-	label.TextStrokeTransparency = 0
-	label.Parent = billboard
-
-	local visual = {
-		model = model,
-		billboard = billboard,
-		label = label,
-	}
-	cagedVisuals[model] = visual
-	return visual
-end
-
-local function destroyCagedVisual(model: Model)
-	local visual = cagedVisuals[model]
-	if not visual then
-		return
-	end
-	cagedVisuals[model] = nil
-	visual.billboard:Destroy()
-end
-
-local function updateCagedVisuals(hiderModels: {[Model]: BasePart})
-	local activeModels: {[Model]: boolean} = {}
-	local now = Workspace:GetServerTimeNow()
-	for model, rootPart in pairs(hiderModels) do
-		if model:GetAttribute(Config.CAGED_ATTRIBUTE) == true then
-			activeModels[model] = true
-			local visual = cagedVisuals[model] or createCagedVisual(model, rootPart)
-			visual.billboard.Adornee = rootPart
-			local deadline = model:GetAttribute(Config.CAGED_UNTIL_ATTRIBUTE)
-			local remaining = if type(deadline) == "number" then math.max(0, math.ceil(deadline - now)) else 0
-			local progress = model:GetAttribute(Config.RESCUE_PROGRESS_ATTRIBUTE)
-			local normalizedProgress = if type(progress) == "number" then math.clamp(progress, 0, 1) else 0
-			if normalizedProgress > 0 then
-				visual.label.Text = ("FREEING %d%%  ·  %ds"):format(
-					math.floor(normalizedProgress * 100 + 0.5),
-					remaining
-				)
-			else
-				visual.label.Text = ("CAGED  ·  %ds\nGET CLOSE TO RESCUE"):format(remaining)
-			end
-		end
-	end
-
-	for model in pairs(cagedVisuals) do
-		if not activeModels[model] then
-			destroyCagedVisual(model)
-		end
-	end
-end
-
 local function updateVisuals()
-	local hiderModels = collectRoleModels(ROLE_HIDER)
-	updateCagedVisuals(hiderModels)
-
 	if roundState:GetAttribute("Phase") ~= PHASE_ROUND then
 		local modelsToRemove: {Model} = {}
 		for model in pairs(searchVisuals) do

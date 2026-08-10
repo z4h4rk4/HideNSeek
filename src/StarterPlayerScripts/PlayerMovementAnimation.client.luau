@@ -65,8 +65,10 @@ end
 local function applyMovementPlaybackSpeed(controller: Controller)
 	if activeController ~= controller
 		or not controller.character.Parent
-		or controller.humanoid.Health <= 0
-		or controller.humanoid.WalkSpeed <= MovementAnimationConfig.MOVING_SPEED_THRESHOLD
+		or controller.humanoid.Health <= 0 then
+		return
+	end
+	if controller.humanoid.WalkSpeed <= MovementAnimationConfig.MOVING_SPEED_THRESHOLD
 		or controller.runningSpeed <= MovementAnimationConfig.MOVING_SPEED_THRESHOLD then
 		return
 	end

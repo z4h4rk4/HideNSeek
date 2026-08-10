@@ -4,9 +4,13 @@ local StarterPlayer = game:GetService("StarterPlayer")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local MovementAnimationConfig = require(ReplicatedStorage:WaitForChild("MovementAnimationConfig"))
+local BatAttackConfig = require(ReplicatedStorage:WaitForChild("BatAttackConfig"))
+
+local ROLE_SEEKER = "Seeker"
 
 type AnimationState = {
 	connection: RBXScriptConnection,
+	knockdownConnection: RBXScriptConnection,
 	idleTrack: AnimationTrack?,
 	moveTrack: AnimationTrack?,
 }
@@ -14,7 +18,18 @@ type AnimationState = {
 local HiderAnimation = {}
 local states: {[Model]: AnimationState} = {}
 
-local function findAnimateTemplate(): Instance?
+local function findAnimateTemplate(npc: Model): Instance?
+	-- HunterCharacter keeps its own animation data. Search the complete model
+	-- so Idle can live either under Animate or alongside it in AnimSaves.
+	if npc:GetAttribute("RoundRole") == ROLE_SEEKER then
+		return npc
+	end
+
+	local embeddedAnimate = npc:FindFirstChild("Animate")
+	if embeddedAnimate then
+		return embeddedAnimate
+	end
+
 	local scripts = StarterPlayer:FindFirstChild("StarterCharacterScripts")
 	return if scripts then scripts:FindFirstChild("Animate") else nil
 end
@@ -57,7 +72,7 @@ function HiderAnimation.Start(npc: Model)
 		return
 	end
 	local humanoid = npc:FindFirstChildOfClass("Humanoid")
-	local animateTemplate = findAnimateTemplate()
+	local animateTemplate = findAnimateTemplate(npc)
 	if not humanoid or not animateTemplate then
 		return
 	end
@@ -89,7 +104,16 @@ function HiderAnimation.Start(npc: Model)
 		idleTrack:Play(0.15)
 	end
 
-	local connection = humanoid.Running:Connect(function(speed)
+	local function updateTracks(speed: number)
+		if npc:GetAttribute(BatAttackConfig.KNOCKDOWN_ATTRIBUTE) == true then
+			if idleTrack and idleTrack.IsPlaying then
+				idleTrack:Stop(0.05)
+			end
+			if moveTrack and moveTrack.IsPlaying then
+				moveTrack:Stop(0.05)
+			end
+			return
+		end
 		if speed > MovementAnimationConfig.MOVING_SPEED_THRESHOLD then
 			if idleTrack and idleTrack.IsPlaying then
 				idleTrack:Stop(0.15)
@@ -108,9 +132,17 @@ function HiderAnimation.Start(npc: Model)
 				idleTrack:Play(0.15)
 			end
 		end
+	end
+
+	local connection = humanoid.Running:Connect(updateTracks)
+	local knockdownConnection = npc:GetAttributeChangedSignal(
+		BatAttackConfig.KNOCKDOWN_ATTRIBUTE
+	):Connect(function()
+		updateTracks(0)
 	end)
 	states[npc] = {
 		connection = connection,
+		knockdownConnection = knockdownConnection,
 		idleTrack = idleTrack,
 		moveTrack = moveTrack,
 	}
@@ -123,6 +155,7 @@ function HiderAnimation.Stop(npc: Model)
 	end
 	states[npc] = nil
 	state.connection:Disconnect()
+	state.knockdownConnection:Disconnect()
 	if state.idleTrack then
 		state.idleTrack:Stop(0)
 		state.idleTrack:Destroy()

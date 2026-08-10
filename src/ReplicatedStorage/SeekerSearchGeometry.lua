@@ -4,6 +4,25 @@ local Config = require(script.Parent:WaitForChild("SeekerSearchConfig"))
 
 local SeekerSearchGeometry = {}
 
+function SeekerSearchGeometry.IsInsideVisionFov(
+	forward: Vector3,
+	direction: Vector3,
+	fovDegrees: number?
+): boolean
+	local flatDirection = Vector2.new(direction.X, direction.Z)
+	if flatDirection.Magnitude <= 0.001 then
+		return true
+	end
+
+	local flatForward = Vector2.new(forward.X, forward.Z)
+	if flatForward.Magnitude <= 0.001 then
+		flatForward = Vector2.new(0, -1)
+	end
+
+	local halfAngle = math.rad((fovDegrees or Config.VISION_FOV_DEGREES) * 0.5)
+	return flatForward.Unit:Dot(flatDirection.Unit) >= math.cos(halfAngle)
+end
+
 function SeekerSearchGeometry.GetForwardRayCount(): number
 	return math.clamp(
 		math.round(Config.VISUAL_RAY_COUNT * Config.FORWARD_RAY_FRACTION),

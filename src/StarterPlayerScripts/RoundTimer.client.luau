@@ -8,6 +8,7 @@ local STATE_NAME = "RoundState"
 local GUI_NAME = "RoundTimerGui"
 
 local PHASE_WAITING = "Waiting"
+local PHASE_PREPARING = "Preparing"
 local PHASE_STARTING = "Starting"
 local PHASE_ROUND = "Round"
 local PHASE_ENDED = "Ended"
@@ -183,10 +184,14 @@ local hiderCapacity = if type(maxHiders) == "number" then maxHiders else 6
 local seekerCapacity = if type(maxSeekers) == "number" then maxSeekers else 2
 
 for index = 1, hiderCapacity do
-	table.insert(hiderSlots, createSlot(index))
+	local slot = createSlot(index)
+	slot.Name = `HiderSlot{index}`
+	table.insert(hiderSlots, slot)
 end
 for index = 1, seekerCapacity do
-	table.insert(seekerSlots, createSlot(hiderCapacity + index))
+	local slot = createSlot(hiderCapacity + index)
+	slot.Name = `HunterSlot{index}`
+	table.insert(seekerSlots, slot)
 end
 
 local summaryLabel = Instance.new("TextLabel")
@@ -196,7 +201,7 @@ summaryLabel.Position = UDim2.new(0.5, 0, 0, 121)
 summaryLabel.Size = UDim2.fromOffset(410, 20)
 summaryLabel.BackgroundTransparency = 1
 summaryLabel.Font = Enum.Font.GothamBold
-summaryLabel.Text = "0/6 HIDERS   0/2 SEEKERS"
+summaryLabel.Text = "0/6 HIDERS   0/2 HUNTERS"
 summaryLabel.TextColor3 = WHITE
 summaryLabel.TextSize = 14
 summaryLabel.TextStrokeColor3 = BLACK
@@ -233,11 +238,38 @@ local function readCount(attributeName: string): number
 	return if type(value) == "number" then math.max(0, math.floor(value)) else 0
 end
 
+local function ensureRoleSlotCount(slots: {Frame}, desired: number, roleName: string)
+	while #slots < desired do
+		local index = #slots + 1
+		local slot = createSlot(index)
+		slot.Name = `{roleName}Slot{index}`
+		table.insert(slots, slot)
+	end
+end
+
 local function updateRoleDisplay()
 	local hiderCount = readCount("HiderCount")
 	local caughtHiderCount = readCount("CaughtHiderCount")
 	local seekerCount = readCount("SeekerCount")
+	local adminNpcCapacity = readCount("MaxAdminNpcs")
+	local displayedHiderCapacity = math.max(
+		hiderCapacity,
+		math.min(hiderCount + caughtHiderCount, hiderCapacity + adminNpcCapacity)
+	)
+	local displayedSeekerCapacity = math.max(
+		seekerCapacity,
+		math.min(seekerCount, seekerCapacity + adminNpcCapacity)
+	)
+	ensureRoleSlotCount(hiderSlots, displayedHiderCapacity, "Hider")
+	ensureRoleSlotCount(seekerSlots, displayedSeekerCapacity, "Hunter")
+
+	local totalDisplayedSlots = displayedHiderCapacity + displayedSeekerCapacity
+	local compactSlots = totalDisplayedSlots > 10
+	slotLayout.Padding = UDim.new(0, if compactSlots then 4 else 7)
 	for index, slot in ipairs(hiderSlots) do
+		slot.Visible = index <= displayedHiderCapacity
+		slot.LayoutOrder = index
+		slot.Size = UDim2.fromOffset(if compactSlots then 24 else 28, if compactSlots then 24 else 28)
 		local state = if index <= hiderCount
 			then "Alive"
 			elseif index <= hiderCount + caughtHiderCount then "Caught"
@@ -245,18 +277,21 @@ local function updateRoleDisplay()
 		setSlotState(slot, state, HIDER_COLOR)
 	end
 	for index, slot in ipairs(seekerSlots) do
+		slot.Visible = index <= displayedSeekerCapacity
+		slot.LayoutOrder = displayedHiderCapacity + index
+		slot.Size = UDim2.fromOffset(if compactSlots then 24 else 28, if compactSlots then 24 else 28)
 		setSlotState(slot, if index <= seekerCount then "Alive" else "Empty", SEEKER_COLOR)
 	end
 
-	summaryLabel.Text = `{hiderCount}/{hiderCapacity} HIDERS · {caughtHiderCount} CAUGHT   `
-		.. `{seekerCount}/{seekerCapacity} SEEKERS`
+	summaryLabel.Text = `{hiderCount}/{displayedHiderCapacity} HIDERS · {caughtHiderCount} CAUGHT   `
+		.. `{seekerCount}/{displayedSeekerCapacity} HUNTERS`
 
 	local role = localPlayer:GetAttribute("RoundRole")
 	if role == ROLE_HIDER then
 		roleLabel.Text = "YOUR ROLE: HIDER"
 		roleLabel.TextColor3 = HIDER_COLOR
 	elseif role == ROLE_SEEKER then
-		roleLabel.Text = "YOUR ROLE: SEEKER"
+		roleLabel.Text = "YOUR ROLE: HUNTER"
 		roleLabel.TextColor3 = SEEKER_COLOR
 	else
 		roleLabel.Text = ""
@@ -265,7 +300,10 @@ end
 
 local function updatePhaseDisplay()
 	local phase = roundState:GetAttribute("Phase")
-	if phase == PHASE_STARTING then
+	if phase == PHASE_PREPARING then
+		phaseLabel.Text = "GET READY"
+		phaseLabel.TextColor3 = WHITE
+	elseif phase == PHASE_STARTING then
 		phaseLabel.Text = "ROUND STARTS IN"
 		phaseLabel.TextColor3 = SEEKER_COLOR
 	elseif phase == PHASE_ROUND then

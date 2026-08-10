@@ -1,16 +1,24 @@
 --!strict
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
+local ArenaTeleportService = require(script.Parent.Parent:WaitForChild("ArenaTeleportService"))
+local BatAttackConfig = require(ReplicatedStorage:WaitForChild("BatAttackConfig"))
+local SeekerSearchConfig = require(ReplicatedStorage:WaitForChild("SeekerSearchConfig"))
 local HiderConfig = require(script.Parent:WaitForChild("HiderConfig"))
 local HiderEvidenceService = require(script.Parent:WaitForChild("HiderEvidenceService"))
 local HiderMapGeometry = require(script.Parent:WaitForChild("HiderMapGeometry"))
 local HiderThreatAwareness = require(script.Parent:WaitForChild("HiderThreatAwareness"))
 local HiderVisibilityGraph = require(script.Parent:WaitForChild("HiderVisibilityGraph"))
+local HunterAggroPresentation = require(script.Parent:WaitForChild("HunterAggroPresentation"))
 local NpcDoorInteraction = require(script.Parent:WaitForChild("NpcDoorInteraction"))
+local RoundConfig = require(script.Parent:WaitForChild("RoundConfig"))
 
 local NPC_FOLDER_NAME = "RoundNPCs"
+local TARGET_KIND_SIGHT = "Sight"
+local TARGET_KIND_LAST_SEEN = "LastSeen"
 
 type CandidateChoice = {
 	position: Vector3,
@@ -36,6 +44,8 @@ export type Controller = {
 	npc: Model,
 	humanoid: Humanoid,
 	rootPart: BasePart,
+	turnAttachment: Attachment,
+	turnOrientation: AlignOrientation,
 	random: Random,
 	running: boolean,
 	active: boolean,
@@ -65,12 +75,23 @@ export type Controller = {
 	plannedEvidence: HiderEvidenceService.Target?,
 	nextEvidenceCheckAt: number,
 	nextEvidenceReplanAt: number,
+	lastSeenOwner: Model?,
+	lastSeenPosition: Vector3?,
+	lastSeenUntil: number,
+	chaseEndsAt: number,
+	aggroReactionEndsAt: number,
+	nextAggroAt: number,
+	lastTeleportCooldownUntil: number,
 }
 
 local HiderBrain = {}
 local currentReservations: {[Model]: DestinationReservation} = {}
 local pendingReservations: {[Model]: DestinationReservation} = {}
 local controllerSerial = 0
+local seekerTargetSerial = 0
+
+local TURN_ATTACHMENT_NAME = "NpcSmoothTurnAttachment"
+local TURN_ORIENTATION_NAME = "NpcSmoothTurnOrientation"
 
 local function planarDistance(left: Vector3, right: Vector3): number
 	return Vector2.new(left.X - right.X, left.Z - right.Z).Magnitude
@@ -79,6 +100,57 @@ end
 local function horizontalUnit(vector: Vector3): Vector3?
 	local horizontal = Vector3.new(vector.X, 0, vector.Z)
 	return if horizontal.Magnitude > 0.001 then horizontal.Unit else nil
+end
+
+local function updateFacingDirection(controller: Controller, fallbackDirection: Vector3)
+	local direction = horizontalUnit(controller.humanoid.MoveDirection) or fallbackDirection
+	controller.lastMoveDirection = direction
+	controller.turnOrientation.CFrame = CFrame.lookAt(Vector3.zero, direction)
+end
+
+local function facePosition(controller: Controller, position: Vector3)
+	local direction = horizontalUnit(position - controller.rootPart.Position)
+	if not direction then
+		return
+	end
+	controller.lastMoveDirection = direction
+	controller.turnOrientation.CFrame = CFrame.lookAt(Vector3.zero, direction)
+end
+
+local function setAggroTurnProfile(controller: Controller, aggro: boolean)
+	controller.turnOrientation.Responsiveness = if aggro
+		then HiderConfig.SEEKER_AGGRO_TURN_RESPONSIVENESS
+		else HiderConfig.NPC_TURN_RESPONSIVENESS
+	controller.turnOrientation.MaxAngularVelocity = if aggro
+		then HiderConfig.SEEKER_AGGRO_TURN_MAX_ANGULAR_VELOCITY
+		else HiderConfig.NPC_TURN_MAX_ANGULAR_VELOCITY
+end
+
+local function createSmoothTurn(rootPart: BasePart): (Attachment, AlignOrientation)
+	local oldAttachment = rootPart:FindFirstChild(TURN_ATTACHMENT_NAME)
+	if oldAttachment then
+		oldAttachment:Destroy()
+	end
+	local oldOrientation = rootPart:FindFirstChild(TURN_ORIENTATION_NAME)
+	if oldOrientation then
+		oldOrientation:Destroy()
+	end
+
+	local attachment = Instance.new("Attachment")
+	attachment.Name = TURN_ATTACHMENT_NAME
+	attachment.Parent = rootPart
+
+	local orientation = Instance.new("AlignOrientation")
+	orientation.Name = TURN_ORIENTATION_NAME
+	orientation.Mode = Enum.OrientationAlignmentMode.OneAttachment
+	orientation.Attachment0 = attachment
+	orientation.RigidityEnabled = false
+	orientation.Responsiveness = HiderConfig.NPC_TURN_RESPONSIVENESS
+	orientation.MaxAngularVelocity = HiderConfig.NPC_TURN_MAX_ANGULAR_VELOCITY
+	orientation.MaxTorque = HiderConfig.NPC_TURN_MAX_TORQUE
+	orientation.CFrame = CFrame.lookAt(Vector3.zero, horizontalUnit(rootPart.CFrame.LookVector) or Vector3.zAxis)
+	orientation.Parent = rootPart
+	return attachment, orientation
 end
 
 local function getLivingRoot(model: Model): BasePart?
@@ -164,13 +236,40 @@ local function setFleeing(controller: Controller, fleeing: boolean)
 	end
 end
 
+local function getSeekerTargetState(target: HiderEvidenceService.Target): string
+	return if target.kind == TARGET_KIND_SIGHT
+		then "Chase"
+		elseif target.kind == TARGET_KIND_LAST_SEEN
+		then "SearchLastKnown"
+		else "Investigate"
+end
+
+local function setSeekerSpeed(controller: Controller)
+	if controller.npc:GetAttribute("RoundRole") ~= HiderConfig.ROLE_SEEKER then
+		return
+	end
+	local multiplier = if controller.chaseEndsAt > 0
+		then HiderConfig.SEEKER_CHASE_SPEED_MULTIPLIER
+		else 1
+	local targetSpeed = RoundConfig.SEEKER_WALK_SPEED * multiplier
+	if math.abs(controller.humanoid.WalkSpeed - targetSpeed) >= 0.01 then
+		controller.humanoid.WalkSpeed = targetSpeed
+	end
+end
+
 local function setSeekerEvidence(
 	controller: Controller,
 	evidence: HiderEvidenceService.Target?
 )
 	controller.seekerEvidence = evidence
+	setSeekerSpeed(controller)
 	if evidence then
-		controller.npc:SetAttribute("AIState", "Investigate")
+		controller.npc:SetAttribute(
+			"AIState",
+			if controller.aggroReactionEndsAt > os.clock()
+				then "Alert"
+				else getSeekerTargetState(evidence)
+		)
 		controller.npc:SetAttribute("AIEvidenceKind", evidence.kind)
 		controller.npc:SetAttribute("AIEvidenceOwner", evidence.owner:GetFullName())
 		controller.npc:SetAttribute("AIEvidenceDistance", evidence.distance)
@@ -182,12 +281,103 @@ local function setSeekerEvidence(
 		controller.npc:SetAttribute("AIEvidencePosition", nil)
 		if controller.active
 			and controller.npc:GetAttribute("RoundRole") == HiderConfig.ROLE_SEEKER then
+			local plannedTarget = controller.plannedEvidence
 			controller.npc:SetAttribute(
 				"AIState",
-				if controller.plannedEvidence then "SearchLastKnown" else "Patrol"
+				if controller.chaseEndsAt > 0
+					then "AggroSearch"
+					elseif plannedTarget
+						and plannedTarget.kind ~= TARGET_KIND_SIGHT
+						and plannedTarget.kind ~= TARGET_KIND_LAST_SEEN
+					then getSeekerTargetState(plannedTarget)
+					else "Patrol"
 			)
 		end
 	end
+end
+
+local function clearLastSeen(controller: Controller)
+	controller.lastSeenOwner = nil
+	controller.lastSeenPosition = nil
+	controller.lastSeenUntil = 0
+end
+
+local function startSeekerChase(controller: Controller, targetPosition: Vector3, now: number)
+	local chaseDuration = controller.random:NextNumber(
+		HiderConfig.SEEKER_CHASE_MIN_SECONDS,
+		HiderConfig.SEEKER_CHASE_MAX_SECONDS
+	)
+	controller.aggroReactionEndsAt = now + HiderConfig.SEEKER_AGGRO_REACTION_SECONDS
+	controller.chaseEndsAt = controller.aggroReactionEndsAt + chaseDuration
+	controller.npc:SetAttribute("AIAggro", true)
+	controller.npc:SetAttribute("AIAggroReactionEndsAt", controller.aggroReactionEndsAt)
+	controller.npc:SetAttribute("AIChaseEndsAt", controller.chaseEndsAt)
+	setAggroTurnProfile(controller, true)
+	facePosition(controller, targetPosition)
+	setSeekerSpeed(controller)
+	HunterAggroPresentation.Show(controller.npc, controller.rootPart)
+end
+
+local function finishSeekerChase(controller: Controller, now: number)
+	controller.chaseEndsAt = 0
+	controller.aggroReactionEndsAt = 0
+	controller.nextAggroAt = now + HiderConfig.SEEKER_REACQUIRE_COOLDOWN_SECONDS
+	controller.npc:SetAttribute("AIAggro", false)
+	controller.npc:SetAttribute("AIAggroReactionEndsAt", 0)
+	controller.npc:SetAttribute("AIChaseEndsAt", 0)
+	setAggroTurnProfile(controller, false)
+	HunterAggroPresentation.Hide(controller.npc)
+	HiderThreatAwareness.ClearSeeker(controller.rootPart)
+	clearLastSeen(controller)
+	setSeekerEvidence(controller, nil)
+end
+
+local function holdSeekerAggroReaction(controller: Controller, now: number): boolean
+	if controller.aggroReactionEndsAt <= 0 then
+		return false
+	end
+	if now >= controller.aggroReactionEndsAt then
+		controller.aggroReactionEndsAt = 0
+		controller.npc:SetAttribute("AIAggroReactionEndsAt", 0)
+		setAggroTurnProfile(controller, false)
+		local target = controller.seekerEvidence
+		controller.npc:SetAttribute(
+			"AIState",
+			if target then getSeekerTargetState(target) else "AggroSearch"
+		)
+		return false
+	end
+
+	controller.humanoid:Move(Vector3.zero, false)
+	local owner = controller.lastSeenOwner
+	local targetRoot = if owner then getLivingRoot(owner) else nil
+	if targetRoot then
+		facePosition(controller, targetRoot.Position)
+	elseif controller.lastSeenPosition then
+		facePosition(controller, controller.lastSeenPosition)
+	end
+	controller.npc:SetAttribute("AIState", "Alert")
+	return true
+end
+
+local function makeSeekerTarget(
+	owner: Model,
+	kind: string,
+	position: Vector3,
+	distance: number,
+	duration: number
+): HiderEvidenceService.Target
+	seekerTargetSerial += 1
+	local serverNow = Workspace:GetServerTimeNow()
+	return {
+		owner = owner,
+		kind = kind,
+		position = position,
+		createdAt = serverNow,
+		expiresAt = serverNow + duration,
+		serial = seekerTargetSerial,
+		distance = distance,
+	}
 end
 
 local function nearestSeekerDistance(position: Vector3, seekerPositions: {Vector3}): number
@@ -299,7 +489,10 @@ local function clearRoute(controller: Controller)
 	if controller.active
 		and not controller.seekerEvidence
 		and controller.npc:GetAttribute("RoundRole") == HiderConfig.ROLE_SEEKER then
-		controller.npc:SetAttribute("AIState", "Patrol")
+		controller.npc:SetAttribute(
+			"AIState",
+			if controller.chaseEndsAt > 0 then "AggroSearch" else "Patrol"
+		)
 	end
 end
 
@@ -433,6 +626,24 @@ local function scoreCandidate(
 		- reservationPenalty
 end
 
+local function appendChoice(
+	bySector: {[string]: {CandidateChoice}},
+	choice: CandidateChoice
+)
+	local sectorChoices = bySector[choice.sectorId]
+	if not sectorChoices then
+		sectorChoices = {}
+		bySector[choice.sectorId] = sectorChoices
+	end
+	table.insert(sectorChoices, choice)
+	table.sort(sectorChoices, function(left, right)
+		return left.score > right.score
+	end)
+	if #sectorChoices > HiderConfig.WANDER_CANDIDATES_PER_SECTOR then
+		table.remove(sectorChoices)
+	end
+end
+
 local function collectChoices(
 	controller: Controller,
 	geometry: HiderMapGeometry.ArenaGeometry,
@@ -446,22 +657,41 @@ local function collectChoices(
 		if candidate then
 			local score = scoreCandidate(controller, origin, candidate, now, seekerPositions)
 			if score then
-				local choice = {
+				appendChoice(bySector, {
 					position = candidate.position,
 					sectorId = candidate.sectorId,
 					score = score,
+				})
+			end
+		end
+	end
+	if controller.npc:GetAttribute("RoundRole") == HiderConfig.ROLE_SEEKER then
+		local searchPoints = HiderVisibilityGraph.GetSearchPoints(geometry, origin.Y)
+		local sampleCount = math.min(
+			#searchPoints,
+			HiderConfig.SEEKER_PATROL_NODE_SAMPLE_COUNT
+		)
+		for _ = 1, sampleCount do
+			local index = controller.random:NextInteger(1, #searchPoints)
+			local position = table.remove(searchPoints, index)
+			if position then
+				local candidate: HiderMapGeometry.Destination = {
+					position = position,
+					sectorId = HiderMapGeometry.GetSectorId(geometry, position),
 				}
-				local sectorChoices = bySector[candidate.sectorId]
-				if not sectorChoices then
-					sectorChoices = {}
-					bySector[candidate.sectorId] = sectorChoices
-				end
-				table.insert(sectorChoices, choice)
-				table.sort(sectorChoices, function(left, right)
-					return left.score > right.score
-				end)
-				if #sectorChoices > HiderConfig.WANDER_CANDIDATES_PER_SECTOR then
-					table.remove(sectorChoices)
+				local score = scoreCandidate(
+					controller,
+					origin,
+					candidate,
+					now,
+					seekerPositions
+				)
+				if score then
+					appendChoice(bySector, {
+						position = position,
+						sectorId = candidate.sectorId,
+						score = score + HiderConfig.SEEKER_PATROL_NODE_BONUS,
+					})
 				end
 			end
 		end
@@ -528,6 +758,45 @@ local function getEvidenceGoal(
 	return nil
 end
 
+local function findPortalRouteToEvidence(
+	geometry: HiderMapGeometry.ArenaGeometry,
+	origin: Vector3,
+	evidenceGoal: Vector3
+): {Vector3}?
+	local bestRoute: {Vector3}? = nil
+	local bestTotalDistance = math.huge
+	for _, link in ipairs(ArenaTeleportService.GetLinks()) do
+		local entryGeometry = HiderMapGeometry.GetForPosition(link.Entry.Position)
+		local exitGeometry = HiderMapGeometry.GetForPosition(link.Exit.Position)
+		if not entryGeometry
+			or entryGeometry.map ~= geometry.map
+			or not exitGeometry
+			or exitGeometry.map ~= geometry.map then
+			continue
+		end
+
+		local entryGoal = getEvidenceGoal(geometry, origin, link.Entry.Position)
+		local exitStart = getEvidenceGoal(geometry, evidenceGoal, link.Exit.Position)
+		local routeToEntry = if entryGoal
+			then HiderVisibilityGraph.FindPath(geometry, origin, entryGoal)
+			else nil
+		local routeFromExit = if exitStart
+			then HiderVisibilityGraph.FindPath(geometry, exitStart, evidenceGoal)
+			else nil
+		if not routeToEntry or #routeToEntry == 0 or not routeFromExit then
+			continue
+		end
+
+		local totalDistance = HiderVisibilityGraph.RouteLength(origin, routeToEntry)
+			+ HiderVisibilityGraph.RouteLength(exitStart :: Vector3, routeFromExit)
+		if totalDistance < bestTotalDistance then
+			bestTotalDistance = totalDistance
+			bestRoute = routeToEntry
+		end
+	end
+	return bestRoute
+end
+
 local function planRoute(
 	controller: Controller,
 	origin: Vector3,
@@ -551,6 +820,9 @@ local function planRoute(
 		local evidenceRoute = if evidenceGoal
 			then HiderVisibilityGraph.FindPath(geometry, origin, evidenceGoal)
 			else nil
+		if evidenceGoal and (not evidenceRoute or #evidenceRoute == 0) then
+			evidenceRoute = findPortalRouteToEvidence(geometry, origin, evidenceGoal)
+		end
 		if evidenceRoute and #evidenceRoute > 0 then
 			return {
 				geometry = geometry,
@@ -614,22 +886,45 @@ local function planRoute(
 	return nil
 end
 
-local function completeEvidence(controller: Controller, evidence: HiderEvidenceService.Target?)
-	if not evidence then
+local function markPatrolDestinationReached(
+	controller: Controller,
+	evidence: HiderEvidenceService.Target?,
+	sectorId: string?,
+	now: number
+)
+	if not evidence and sectorId then
+		controller.sectorVisits[sectorId] = now
+		local pending = controller.pendingRoute
+		if pending and pending.sectorId == sectorId then
+			clearPendingRoute(controller)
+		end
+	end
+end
+
+local function completeSeekerTarget(
+	controller: Controller,
+	target: HiderEvidenceService.Target?
+)
+	if not target then
 		return
 	end
-	local geometry = HiderMapGeometry.GetForPosition(controller.rootPart.Position)
-	local nextEvidence = if geometry
-		then HiderEvidenceService.GetClosest(
-			controller.rootPart.Position,
-			geometry,
-			Workspace:GetServerTimeNow()
-		)
-		else nil
-	setSeekerEvidence(controller, nextEvidence)
-	if nextEvidence then
-		controller.nextEvidenceReplanAt = os.clock()
-			+ HiderConfig.SEEKER_EVIDENCE_REPLAN_INTERVAL
+	if target.kind ~= TARGET_KIND_LAST_SEEN then
+		return
+	end
+	local selected = controller.seekerEvidence
+	if selected
+		and selected.kind == TARGET_KIND_LAST_SEEN
+		and selected.owner == target.owner then
+		local now = os.clock()
+		if controller.chaseEndsAt > now then
+			-- The Hunter reached the last seen position before the chase timer
+			-- expired. Keep the alert and faster search patrol alive so briefly
+			-- breaking line of sight does not switch the monster off instantly.
+			clearLastSeen(controller)
+			setSeekerEvidence(controller, nil)
+		else
+			finishSeekerChase(controller, now)
+		end
 	end
 end
 
@@ -646,7 +941,13 @@ local function startPlannedRoute(controller: Controller, planned: PlannedRoute, 
 		firstWaypoint = controller.route[controller.routeIndex]
 	end
 	if controller.routeIndex > #controller.route then
-		completeEvidence(controller, controller.plannedEvidence)
+		markPatrolDestinationReached(
+			controller,
+			controller.plannedEvidence,
+			planned.sectorId,
+			now
+		)
+		completeSeekerTarget(controller, controller.plannedEvidence)
 		clearRoute(controller)
 		return false
 	end
@@ -659,7 +960,6 @@ local function startPlannedRoute(controller: Controller, planned: PlannedRoute, 
 			position = planned.destination,
 			sectorId = planned.sectorId,
 		}
-		controller.sectorVisits[planned.sectorId] = now
 	end
 	controller.npc:SetAttribute("AITargetSector", planned.sectorId)
 	controller.npc:SetAttribute("AITargetPosition", planned.destination)
@@ -849,10 +1149,116 @@ local function shouldReplanForSeeker(controller: Controller, now: number): boole
 	return true
 end
 
-local function shouldReplanForEvidence(controller: Controller, now: number): boolean
-	if controller.npc:GetAttribute("RoundRole") ~= HiderConfig.ROLE_SEEKER then
-		if controller.seekerEvidence then
+local function rememberedHiderIsValid(controller: Controller): boolean
+	local owner = controller.lastSeenOwner
+	if not owner then
+		return false
+	end
+	local player = Players:GetPlayerFromCharacter(owner)
+	if not player
+		or player.Character ~= owner
+		or player:GetAttribute("RoundRole") ~= HiderConfig.ROLE_HIDER then
+		return false
+	end
+	return getLivingRoot(owner) ~= nil
+end
+
+local function selectSeekerTarget(
+	controller: Controller,
+	geometry: HiderMapGeometry.ArenaGeometry,
+	now: number
+): HiderEvidenceService.Target?
+	if controller.chaseEndsAt > 0 and now >= controller.chaseEndsAt then
+		finishSeekerChase(controller, now)
+	end
+	local currentTarget = controller.seekerEvidence
+	local preferredCharacter = if currentTarget then currentTarget.owner else nil
+	local visible = if controller.chaseEndsAt > 0 or now >= controller.nextAggroAt
+		then HiderThreatAwareness.GetBestVisibleHumanHider(
+			controller.humanoid,
+			controller.rootPart,
+			geometry,
+			SeekerSearchConfig.VISION_DISTANCE,
+			preferredCharacter,
+			HiderConfig.SEEKER_TARGET_SWITCH_ADVANTAGE
+		)
+		else nil
+	if visible then
+		if controller.chaseEndsAt <= 0 then
+			startSeekerChase(controller, visible.position, now)
+		end
+		if visible.currentlyVisible then
+			controller.lastSeenOwner = visible.character
+			controller.lastSeenPosition = visible.position
+			controller.lastSeenUntil = controller.chaseEndsAt
+		end
+		return makeSeekerTarget(
+			visible.character,
+			TARGET_KIND_SIGHT,
+			visible.position,
+			visible.distance,
+			HiderConfig.SEEKER_EVIDENCE_CHECK_INTERVAL * 2
+		)
+	end
+
+	local owner = controller.lastSeenOwner
+	local position = controller.lastSeenPosition
+	if owner and not rememberedHiderIsValid(controller) then
+		finishSeekerChase(controller, now)
+		return nil
+	end
+	if owner
+		and position
+		and now < controller.lastSeenUntil
+		then
+		if HiderMapGeometry.ContainsPosition(geometry, position) then
+			return makeSeekerTarget(
+				owner,
+				TARGET_KIND_LAST_SEEN,
+				position,
+				planarDistance(controller.rootPart.Position, position),
+				controller.lastSeenUntil - now
+			)
+		end
+	end
+	clearLastSeen(controller)
+	local evidence = HiderEvidenceService.GetClosest(
+		controller.rootPart.Position,
+		geometry,
+		Workspace:GetServerTimeNow(),
+		if currentTarget
+			and currentTarget.kind ~= TARGET_KIND_SIGHT
+			and currentTarget.kind ~= TARGET_KIND_LAST_SEEN
+			then currentTarget.owner
+			else nil
+	)
+	if evidence then
+		return evidence
+	end
+	return nil
+end
+
+local function shouldReplanForSeekerTarget(controller: Controller, now: number): boolean
+	local role = controller.npc:GetAttribute("RoundRole")
+	if role ~= HiderConfig.ROLE_SEEKER then
+		local previousState = controller.npc:GetAttribute("AIState")
+		local hadAggro = controller.chaseEndsAt > 0
+			or controller.aggroReactionEndsAt > 0
+			or controller.npc:GetAttribute("AIAggro") == true
+		if hadAggro then
+			finishSeekerChase(controller, now)
+		elseif controller.seekerEvidence then
 			setSeekerEvidence(controller, nil)
+		end
+		clearLastSeen(controller)
+		controller.chaseEndsAt = 0
+		controller.aggroReactionEndsAt = 0
+		controller.nextAggroAt = 0
+		if role == HiderConfig.ROLE_HIDER
+			and previousState ~= "Wander"
+			and previousState ~= "Escape" then
+			controller.humanoid.WalkSpeed = RoundConfig.WALK_SPEED
+			controller.npc:SetAttribute("AIState", "Wander")
 		end
 		return false
 	end
@@ -863,44 +1269,54 @@ local function shouldReplanForEvidence(controller: Controller, now: number): boo
 
 	local geometry = HiderMapGeometry.GetForPosition(controller.rootPart.Position)
 	if not geometry then
-		local wasTrackingEvidence = controller.seekerEvidence ~= nil
+		local wasTrackingTarget = controller.seekerEvidence ~= nil
 			or controller.plannedEvidence ~= nil
-		if wasTrackingEvidence then
+		local hadAggro = controller.chaseEndsAt > 0 or controller.aggroReactionEndsAt > 0
+		if hadAggro then
+			finishSeekerChase(controller, now)
+		elseif wasTrackingTarget then
 			setSeekerEvidence(controller, nil)
+		end
+		if wasTrackingTarget or hadAggro then
 			clearPendingRoute(controller)
 		end
-		return wasTrackingEvidence
+		clearLastSeen(controller)
+		return wasTrackingTarget or hadAggro
 	end
-	local evidence = HiderEvidenceService.GetClosest(
-		controller.rootPart.Position,
-		geometry,
-		Workspace:GetServerTimeNow()
-	)
-	if not evidence then
-		local wasTrackingEvidence = controller.seekerEvidence ~= nil
+	local target = selectSeekerTarget(controller, geometry, now)
+	if not target then
+		local wasTrackingTarget = controller.seekerEvidence ~= nil
 			or controller.plannedEvidence ~= nil
-		if wasTrackingEvidence then
+		if wasTrackingTarget then
 			setSeekerEvidence(controller, nil)
 			clearPendingRoute(controller)
 		end
-		return wasTrackingEvidence
+		return wasTrackingTarget
 	end
 
 	local previous = controller.seekerEvidence
-	setSeekerEvidence(controller, evidence)
+	setSeekerEvidence(controller, target)
 	if not previous then
+		controller.nextEvidenceReplanAt = now + HiderConfig.SEEKER_EVIDENCE_REPLAN_INTERVAL
+		return true
+	end
+
+	local plannedTarget = controller.plannedEvidence
+	if not plannedTarget then
+		controller.nextEvidenceReplanAt = now + HiderConfig.SEEKER_EVIDENCE_REPLAN_INTERVAL
+		return true
+	end
+	local ownerChanged = plannedTarget.owner ~= target.owner
+	if ownerChanged and target.kind == TARGET_KIND_SIGHT then
 		controller.nextEvidenceReplanAt = now + HiderConfig.SEEKER_EVIDENCE_REPLAN_INTERVAL
 		return true
 	end
 	if now < controller.nextEvidenceReplanAt then
 		return false
 	end
-
-	local plannedEvidence = controller.plannedEvidence
-	if not plannedEvidence
-		or plannedEvidence.owner ~= evidence.owner
-		or plannedEvidence.kind ~= evidence.kind
-		or planarDistance(plannedEvidence.position, evidence.position)
+	if ownerChanged
+		or plannedTarget.kind ~= target.kind
+		or planarDistance(plannedTarget.position, target.position)
 			>= HiderConfig.SEEKER_EVIDENCE_REPLAN_DISTANCE then
 		controller.nextEvidenceReplanAt = now + HiderConfig.SEEKER_EVIDENCE_REPLAN_INTERVAL
 		return true
@@ -915,6 +1331,8 @@ function HiderBrain.New(npc: Model): Controller?
 		return nil
 	end
 	controllerSerial += 1
+	local turnAttachment, turnOrientation = createSmoothTurn(rootPart)
+	humanoid.AutoRotate = false
 	local navigationSeed = math.floor(os.clock() * 1000000 + controllerSerial * 104729)
 		% 2147483647
 	navigationSeed = math.max(1, navigationSeed)
@@ -940,10 +1358,15 @@ function HiderBrain.New(npc: Model): Controller?
 	npc:SetAttribute("AIEvidenceOwner", "")
 	npc:SetAttribute("AIEvidenceDistance", -1)
 	npc:SetAttribute("AIEvidencePosition", nil)
+	npc:SetAttribute("AIAggro", false)
+	npc:SetAttribute("AIAggroReactionEndsAt", 0)
+	npc:SetAttribute("AIChaseEndsAt", 0)
 	return {
 		npc = npc,
 		humanoid = humanoid,
 		rootPart = rootPart,
+		turnAttachment = turnAttachment,
+		turnOrientation = turnOrientation,
 		random = Random.new(navigationSeed),
 		running = true,
 		active = false,
@@ -973,6 +1396,13 @@ function HiderBrain.New(npc: Model): Controller?
 		plannedEvidence = nil,
 		nextEvidenceCheckAt = 0,
 		nextEvidenceReplanAt = 0,
+		lastSeenOwner = nil,
+		lastSeenPosition = nil,
+		lastSeenUntil = 0,
+		chaseEndsAt = 0,
+		aggroReactionEndsAt = 0,
+		nextAggroAt = 0,
+		lastTeleportCooldownUntil = 0,
 	}
 end
 
@@ -981,6 +1411,7 @@ function HiderBrain.SetActive(controller: Controller, active: boolean)
 		return
 	end
 	controller.active = active
+	controller.humanoid.AutoRotate = false
 	clearRoute(controller)
 	clearPendingRoute(controller)
 	controller.sectorVisits = {}
@@ -995,6 +1426,13 @@ function HiderBrain.SetActive(controller: Controller, active: boolean)
 	controller.plannedEvidence = nil
 	controller.nextEvidenceCheckAt = 0
 	controller.nextEvidenceReplanAt = 0
+	controller.chaseEndsAt = 0
+	controller.aggroReactionEndsAt = 0
+	controller.nextAggroAt = 0
+	clearLastSeen(controller)
+	HiderThreatAwareness.ClearSeeker(controller.rootPart)
+	setAggroTurnProfile(controller, false)
+	HunterAggroPresentation.Hide(controller.npc)
 	controller.npc:SetAttribute("AIFleeing", false)
 	controller.npc:SetAttribute("AINearestSeekerDistance", -1)
 	controller.npc:SetAttribute("AISeekerCount", 0)
@@ -1003,7 +1441,14 @@ function HiderBrain.SetActive(controller: Controller, active: boolean)
 	controller.npc:SetAttribute("AIEvidenceOwner", "")
 	controller.npc:SetAttribute("AIEvidenceDistance", -1)
 	controller.npc:SetAttribute("AIEvidencePosition", nil)
+	controller.npc:SetAttribute("AIAggro", false)
+	controller.npc:SetAttribute("AIAggroReactionEndsAt", 0)
+	controller.npc:SetAttribute("AIChaseEndsAt", 0)
+	if controller.npc:GetAttribute(SeekerSearchConfig.CAGED_ATTRIBUTE) ~= true then
+		setSeekerSpeed(controller)
+	end
 	if active then
+		setSeekerSpeed(controller)
 		controller.npc:SetAttribute(
 			"AIState",
 			if controller.npc:GetAttribute("RoundRole") == HiderConfig.ROLE_SEEKER
@@ -1027,18 +1472,49 @@ function HiderBrain.Step(controller: Controller)
 		return
 	end
 	if controller.humanoid.Health <= 0 then
+		if controller.chaseEndsAt > 0
+			or controller.aggroReactionEndsAt > 0
+			or controller.npc:GetAttribute("AIAggro") == true then
+			finishSeekerChase(controller, os.clock())
+		end
 		controller.humanoid:Move(Vector3.zero, false)
 		return
 	end
+	if controller.npc:GetAttribute(BatAttackConfig.KNOCKDOWN_ATTRIBUTE) == true
+		or controller.humanoid.PlatformStand then
+		controller.humanoid:Move(Vector3.zero, false)
+		return
+	end
+	-- Cage/knockdown systems restore the speed they observed before disabling an
+	-- NPC. Reassert the current patrol/chase profile after those states end.
+	setSeekerSpeed(controller)
 	local now = os.clock()
-	if shouldReplanForSeeker(controller, now)
-		or shouldReplanForEvidence(controller, now) then
+	local teleportCooldown = controller.npc:GetAttribute(ArenaTeleportService.COOLDOWN_ATTRIBUTE)
+	local teleportCooldownUntil = if type(teleportCooldown) == "number" then teleportCooldown else 0
+	if teleportCooldownUntil > controller.lastTeleportCooldownUntil then
+		controller.lastTeleportCooldownUntil = teleportCooldownUntil
 		clearPendingRoute(controller)
 		clearRoute(controller)
 		if not planAndStart(controller, now) then
 			controller.humanoid:Move(Vector3.zero, false)
 			return
 		end
+	end
+	local seekerTargetChanged = shouldReplanForSeekerTarget(controller, now)
+	local hiderThreatChanged = shouldReplanForSeeker(controller, now)
+	if seekerTargetChanged or hiderThreatChanged then
+		clearPendingRoute(controller)
+		clearRoute(controller)
+		if holdSeekerAggroReaction(controller, now) then
+			return
+		end
+		if not planAndStart(controller, now) then
+			controller.humanoid:Move(Vector3.zero, false)
+			return
+		end
+	end
+	if holdSeekerAggroReaction(controller, now) then
+		return
 	end
 	local waypoint = controller.route[controller.routeIndex]
 	if not waypoint then
@@ -1054,7 +1530,13 @@ function HiderBrain.Step(controller: Controller)
 	while waypoint and waypointReached(controller, waypoint) do
 		controller.routeIndex += 1
 		if controller.routeIndex > #controller.route then
-			completeEvidence(controller, controller.plannedEvidence)
+			markPatrolDestinationReached(
+				controller,
+				controller.plannedEvidence,
+				controller.destinationSector,
+				now
+			)
+			completeSeekerTarget(controller, controller.plannedEvidence)
 			clearRoute(controller)
 			if not activatePendingRoute(controller, now) and not planAndStart(controller, now) then
 				controller.humanoid:Move(Vector3.zero, false)
@@ -1071,8 +1553,8 @@ function HiderBrain.Step(controller: Controller)
 	end
 	local direction = horizontalUnit(waypoint - controller.rootPart.Position)
 	if direction then
-		controller.lastMoveDirection = direction
 		controller.humanoid:Move(direction, false)
+		updateFacingDirection(controller, direction)
 	else
 		controller.humanoid:Move(Vector3.zero, false)
 	end
@@ -1139,6 +1621,18 @@ function HiderBrain.Destroy(controller: Controller)
 	controller.fleeSafeSince = 0
 	controller.seekerEvidence = nil
 	controller.plannedEvidence = nil
+	controller.chaseEndsAt = 0
+	controller.aggroReactionEndsAt = 0
+	controller.nextAggroAt = 0
+	clearLastSeen(controller)
+	HiderThreatAwareness.ClearSeeker(controller.rootPart)
+	controller.npc:SetAttribute("AIAggro", false)
+	controller.npc:SetAttribute("AIAggroReactionEndsAt", 0)
+	controller.npc:SetAttribute("AIChaseEndsAt", 0)
+	HunterAggroPresentation.Destroy(controller.npc)
+	controller.turnOrientation:Destroy()
+	controller.turnAttachment:Destroy()
+	controller.humanoid.AutoRotate = true
 	controller.humanoid:Move(Vector3.zero, false)
 end
 

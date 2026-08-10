@@ -1,9 +1,9 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
 
 local SeekerSearchConfig = require(ReplicatedStorage:WaitForChild("SeekerSearchConfig"))
+local LeakConfig = require(ReplicatedStorage:WaitForChild("LeakConfig"))
 
 local ASSETS_FOLDER_NAME = "LeaksVisualAssets"
 local NPC_FOLDER_NAME = "RoundNPCs"
@@ -16,12 +16,6 @@ local LEAK_NAMES = {
 	leaks = true,
 }
 
-local WET_TRAIL_DURATION = 5
-local FOOTPRINT_LIFETIME = 5
-local FADE_DURATION = 1.5
-local CHECK_INTERVAL = 0.05
-local MIN_MOVE_SPEED = 1
-local STEP_DISTANCE = 2.2
 local FOOT_SIDE_OFFSET = 0.45
 local FOOTPRINT_SIZE = Vector3.new(1, 0.02, 1.7)
 local SURFACE_OFFSET = 0.02
@@ -221,7 +215,9 @@ local function isLeakPart(part: BasePart): boolean
 end
 
 local function getFloorHit(tracker)
-	local rayLength = tracker.humanoid.HipHeight + tracker.rootPart.Size.Y / 2 + 4
+	local rayLength = tracker.humanoid.HipHeight
+		+ tracker.rootPart.Size.Y / 2
+		+ LeakConfig.RAY_EXTRA_DISTANCE
 	return workspace:Raycast(
 		tracker.rootPart.Position,
 		Vector3.new(0, -rayLength, 0),
@@ -229,39 +225,17 @@ local function getFloorHit(tracker)
 	)
 end
 
-local function removeFootprintFromTracker(tracker, footprintToRemove)
-	for index, footprint in ipairs(tracker.footprints) do
-		if footprint == footprintToRemove then
-			table.remove(tracker.footprints, index)
-			return
-		end
-	end
-end
-
-local function fadeFootprint(tracker, footprint)
-	if footprint.fading then
+local function createFootprint(
+	tracker,
+	raycastResult: RaycastResult,
+	direction: Vector3,
+	now: number
+)
+	local remainingWetSeconds = math.max(0, tracker.wetUntil - now)
+	if remainingWetSeconds <= 0 then
 		return
 	end
 
-	footprint.fading = true
-	removeFootprintFromTracker(tracker, footprint)
-
-	if not footprint.holder.Parent then
-		return
-	end
-
-	TweenService:Create(
-		footprint.decal,
-		TweenInfo.new(FADE_DURATION, Enum.EasingStyle.Linear),
-		{ Transparency = 1 }
-	):Play()
-
-	task.delay(FADE_DURATION, function()
-		footprint.holder:Destroy()
-	end)
-end
-
-local function createFootprint(tracker, raycastResult: RaycastResult, direction: Vector3)
 	local normal = raycastResult.Normal
 	local forward = direction - normal * direction:Dot(normal)
 	if forward.Magnitude < 0.01 then
@@ -295,21 +269,36 @@ local function createFootprint(tracker, raycastResult: RaycastResult, direction:
 	local decal = footprint.decal:Clone()
 	decal.Face = Enum.NormalId.Top
 	decal.Color3 = tracker.leakColor
+	local baseTransparency = decal.Transparency
+	local recoveryAlpha = LeakConfig.GetRecoveryAlpha(remainingWetSeconds)
+	decal.Transparency = baseTransparency + (1 - baseTransparency) * recoveryAlpha
 	decal.Parent = holder
 
 	local footprintRecord = {
 		holder = holder,
 		decal = decal,
-		fading = false,
+		baseTransparency = baseTransparency,
+		expiresAt = tracker.wetUntil,
 	}
 	table.insert(tracker.footprints, footprintRecord)
 
-	task.delay(FOOTPRINT_LIFETIME, function()
-		fadeFootprint(tracker, footprintRecord)
-	end)
-
 	tracker.nextFootIsLeft = not isLeftFoot
 	tracker.lastFootprintPosition = raycastResult.Position
+end
+
+local function updateFootprints(tracker, now: number)
+	for index = #tracker.footprints, 1, -1 do
+		local footprint = tracker.footprints[index]
+		local remainingWetSeconds = math.max(0, footprint.expiresAt - now)
+		if remainingWetSeconds <= 0 or not footprint.holder.Parent then
+			footprint.holder:Destroy()
+			table.remove(tracker.footprints, index)
+		else
+			local recoveryAlpha = LeakConfig.GetRecoveryAlpha(remainingWetSeconds)
+			footprint.decal.Transparency = footprint.baseTransparency
+				+ (1 - footprint.baseTransparency) * recoveryAlpha
+		end
+	end
 end
 
 local function removeCharacter(character: Model)
@@ -423,11 +412,12 @@ local function refreshEligibleCharacters()
 end
 
 local function updateTracker(tracker, now: number)
+	updateFootprints(tracker, now)
 	local raycastResult = getFloorHit(tracker)
 	local isOnLeak = raycastResult ~= nil and isLeakPart(raycastResult.Instance)
 	local velocity = tracker.rootPart.AssemblyLinearVelocity
 	local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
-	local isMoving = horizontalVelocity.Magnitude >= MIN_MOVE_SPEED
+	local isMoving = horizontalVelocity.Magnitude >= LeakConfig.MIN_MOVE_SPEED
 
 	if isOnLeak and raycastResult then
 		local leakColor = raycastResult.Instance.Color
@@ -436,7 +426,7 @@ local function updateTracker(tracker, now: number)
 			setVfxColor(tracker.vfx, leakColor)
 		end
 
-		tracker.wetUntil = now + WET_TRAIL_DURATION
+		tracker.wetUntil = now + LeakConfig.TRAIL_DURATION_SECONDS
 		tracker.trailActive = true
 
 		if not tracker.wasOnLeak then
@@ -456,9 +446,9 @@ local function updateTracker(tracker, now: number)
 		local lastPosition = tracker.lastFootprintPosition
 		if
 			not lastPosition
-			or (raycastResult.Position - lastPosition).Magnitude >= STEP_DISTANCE
+			or (raycastResult.Position - lastPosition).Magnitude >= LeakConfig.STEP_DISTANCE
 		then
-			createFootprint(tracker, raycastResult, horizontalVelocity.Unit)
+			createFootprint(tracker, raycastResult, horizontalVelocity.Unit, now)
 		end
 	elseif tracker.trailActive and now >= tracker.wetUntil then
 		tracker.trailActive = false
@@ -472,12 +462,12 @@ local accumulatedTime = 0
 
 RunService.Heartbeat:Connect(function(deltaTime)
 	accumulatedTime += deltaTime
-	if accumulatedTime < CHECK_INTERVAL then
+	if accumulatedTime < LeakConfig.CLIENT_CHECK_INTERVAL_SECONDS then
 		return
 	end
 
-	accumulatedTime %= CHECK_INTERVAL
-	local now = time()
+	accumulatedTime %= LeakConfig.CLIENT_CHECK_INTERVAL_SECONDS
+	local now = workspace:GetServerTimeNow()
 	refreshEligibleCharacters()
 
 	for character, tracker in pairs(trackers) do

@@ -1,7 +1,9 @@
 --!strict
 
 local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local SeekerSearchConfig = require(ReplicatedStorage:WaitForChild("SeekerSearchConfig"))
 local HiderAnimation = require(script.Parent:WaitForChild("HiderAnimation"))
 local HiderBrain = require(script.Parent:WaitForChild("HiderBrain"))
 local HiderConfig = require(script.Parent:WaitForChild("HiderConfig"))
@@ -9,7 +11,6 @@ local HiderVisibilityGraph = require(script.Parent:WaitForChild("HiderVisibility
 
 local HiderService = {}
 local controllers: {[Model]: HiderBrain.Controller} = {}
-local cagedNpcs: {[Model]: boolean} = {}
 local currentPhase = "Waiting"
 local adminEnabled = true
 
@@ -21,7 +22,7 @@ task.defer(function()
 end)
 
 local function shouldNpcMove(npc: Model): boolean
-	if not adminEnabled or cagedNpcs[npc] == true then
+	if not adminEnabled or npc:GetAttribute(SeekerSearchConfig.CAGED_ATTRIBUTE) == true then
 		return false
 	end
 	if currentPhase == HiderConfig.ROUND_PHASE then
@@ -29,6 +30,14 @@ local function shouldNpcMove(npc: Model): boolean
 	end
 	return currentPhase == HiderConfig.STARTING_PHASE
 		and npc:GetAttribute("RoundRole") == HiderConfig.ROLE_HIDER
+end
+
+function HiderService.SetCaged(npc: Model, caged: boolean)
+	npc:SetAttribute(SeekerSearchConfig.CAGED_ATTRIBUTE, if caged then true else nil)
+	local controller = controllers[npc]
+	if controller then
+		HiderBrain.SetActive(controller, shouldNpcMove(npc))
+	end
 end
 
 local function run(controller: HiderBrain.Controller)
@@ -63,7 +72,6 @@ function HiderService.Start(npc: Model)
 end
 
 function HiderService.Stop(npc: Model)
-	cagedNpcs[npc] = nil
 	local controller = controllers[npc]
 	if controller then
 		controllers[npc] = nil
@@ -82,18 +90,6 @@ end
 function HiderService.SetAdminEnabled(enabled: boolean)
 	adminEnabled = enabled
 	for npc, controller in pairs(controllers) do
-		HiderBrain.SetActive(controller, shouldNpcMove(npc))
-	end
-end
-
-function HiderService.SetCaged(npc: Model, caged: boolean)
-	if caged then
-		cagedNpcs[npc] = true
-	else
-		cagedNpcs[npc] = nil
-	end
-	local controller = controllers[npc]
-	if controller then
 		HiderBrain.SetActive(controller, shouldNpcMove(npc))
 	end
 end

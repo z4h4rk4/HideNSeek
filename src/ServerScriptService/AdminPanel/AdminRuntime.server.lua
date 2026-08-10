@@ -23,6 +23,7 @@ type PlayerCache = {
 local busy: {[Player]: boolean} = {}
 local lastRequestAt: {[Player]: number} = {}
 local lastActionAt: {[Player]: {[string]: number}} = {}
+local lastResourceActionAt: {[string]: number} = {}
 local lastAcceptedSequence: {[Player]: number} = {}
 local responseCaches: {[Player]: PlayerCache} = {}
 
@@ -42,7 +43,7 @@ end
 local function payloadFingerprint(payload: {[any]: any}): string?
 	local keys: {string} = {}
 	for key, value in payload do
-		if type(key) ~= "string" then
+		if type(key) ~= "string" or #key > 64 then
 			return nil
 		end
 		local valueType = type(value)
@@ -70,8 +71,19 @@ local function payloadFingerprint(payload: {[any]: any}): string?
 	return table.concat(pieces, "|")
 end
 
-local function sanitize(value: any, depth: number?): any
+type SanitizeBudget = {
+	Nodes: number,
+	Exceeded: boolean,
+}
+
+local function sanitize(value: any, depth: number?, budget: SanitizeBudget?): any
 	local currentDepth = depth or 0
+	local currentBudget = budget or { Nodes = 0, Exceeded = false }
+	currentBudget.Nodes += 1
+	if currentBudget.Nodes > Config.MaxResponseNodes then
+		currentBudget.Exceeded = true
+		return nil
+	end
 	local valueType = type(value)
 	if valueType == "boolean" then
 		return value
@@ -90,7 +102,7 @@ local function sanitize(value: any, depth: number?): any
 	local count = 0
 	for key, child in value do
 		if type(key) == "string" and #key <= 64 then
-			local sanitized = sanitize(child, currentDepth + 1)
+			local sanitized = sanitize(child, currentDepth + 1, currentBudget)
 			if sanitized ~= nil then
 				result[key] = sanitized
 				count += 1
@@ -211,11 +223,20 @@ local function mountPanel(player: Player)
 		end
 		local action = if type(payload.Action) == "string" then payload.Action else ""
 		local actionCooldown = Config.ActionCooldownSeconds[action]
+		local resourceKey = Config.ActionResourceKeys[action]
+		local resourceCooldown = if resourceKey
+			then Config.ResourceCooldownSeconds[resourceKey]
+			else nil
 		local playerActionTimes = lastActionAt[invokingPlayer]
 		if actionCooldown
 			and playerActionTimes
 			and now - (playerActionTimes[action] or 0) < actionCooldown then
 			return basicResponse(false, "ACTION_RATE_LIMITED", "Please wait before repeating this action.")
+		end
+		if resourceKey
+			and resourceCooldown
+			and now - (lastResourceActionAt[resourceKey] or 0) < resourceCooldown then
+			return basicResponse(false, "RESOURCE_RATE_LIMITED", "Please wait before changing this server resource again.")
 		end
 
 		lastRequestAt[invokingPlayer] = now
@@ -226,6 +247,9 @@ local function mountPanel(player: Player)
 				lastActionAt[invokingPlayer] = playerActionTimes
 			end
 			playerActionTimes[action] = now
+		end
+		if resourceKey then
+			lastResourceActionAt[resourceKey] = now
 		end
 		busy[invokingPlayer] = true
 		local handled, rawResult = xpcall(function()
@@ -242,15 +266,18 @@ local function mountPanel(player: Player)
 			))
 			result = basicResponse(false, "SERVER_ERROR", "Internal server error.")
 		else
-			local sanitized = sanitize(rawResult)
-			if type(sanitized) ~= "table" then
+			local responseBudget: SanitizeBudget = { Nodes = 0, Exceeded = false }
+			local sanitized = sanitize(rawResult, 0, responseBudget)
+			if responseBudget.Exceeded or type(sanitized) ~= "table" then
 				result = basicResponse(false, "SERVER_ERROR", "Invalid server response.")
 			else
 				result = sanitized
 			end
 		end
 		result.RequestId = requestId
-		cacheResponse(invokingPlayer, requestId, fingerprint, result)
+		if invokingPlayer.Parent == Players then
+			cacheResponse(invokingPlayer, requestId, fingerprint, result)
+		end
 		return result
 	end
 	remote.Parent = screenGui

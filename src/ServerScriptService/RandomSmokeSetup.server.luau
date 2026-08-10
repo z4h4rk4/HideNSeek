@@ -7,7 +7,6 @@ local ServerStorage = game:GetService("ServerStorage")
 local SoundService = game:GetService("SoundService")
 local Workspace = game:GetService("Workspace")
 
-local SeekerSearchConfig = require(ReplicatedStorage:WaitForChild("SeekerSearchConfig"))
 local HiderEvidenceService = require(
 	script.Parent:WaitForChild("Round"):WaitForChild("HiderEvidenceService")
 )
@@ -178,10 +177,7 @@ task.spawn(function()
 			end
 
 			local rootPart, isMoving = getCharacterMovement(character)
-			if character:GetAttribute(SeekerSearchConfig.CAGED_ATTRIBUTE) == true then
-				state.standingSeconds = 0
-				state.fartPlayed = false
-			elseif not rootPart then
+			if not rootPart then
 				state.standingSeconds = 0
 				state.fartPlayed = false
 			elseif isMoving then
