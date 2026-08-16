@@ -7,21 +7,22 @@ local RunService = game:GetService("RunService")
 local MovementAnimationConfig = require(ReplicatedStorage:WaitForChild("MovementAnimationConfig"))
 
 type Controller = {
+	player: Player,
 	character: Model,
 	humanoid: Humanoid,
+	rootPart: BasePart,
 	animator: Animator,
-	runningSpeed: number,
 	movementAnimationIds: {[string]: boolean},
 	connections: {RBXScriptConnection},
 }
 
-local localPlayer = Players.LocalPlayer
-local activeController: Controller? = nil
-local setupGeneration = 0
+local controllers: {[Model]: Controller} = {}
+local playerConnections: {[Player]: {RBXScriptConnection}} = {}
+local setupRevisions: {[Player]: number} = {}
 
-local function disconnectController()
-	local controller = activeController
-	activeController = nil
+local function disconnectController(character: Model)
+	local controller = controllers[character]
+	controllers[character] = nil
 	if not controller then
 		return
 	end
@@ -39,12 +40,11 @@ end
 
 local function animationLooksLikeMovement(animation: Animation, character: Model): boolean
 	local current: Instance? = animation
-	while current do
+	-- Do not classify by the character name: a player whose username contains
+	-- "run" or "walk" must not make every one of their tracks locomotion.
+	while current and current ~= character do
 		if nameLooksLikeMovement(current.Name) then
 			return true
-		end
-		if current == character then
-			break
 		end
 		current = current.Parent
 	end
@@ -62,14 +62,23 @@ local function trackIsMovement(controller: Controller, track: AnimationTrack): b
 	return animationLooksLikeMovement(animation, controller.character)
 end
 
+local function getHorizontalSpeed(rootPart: BasePart): number
+	local velocity = rootPart.AssemblyLinearVelocity
+	return Vector2.new(velocity.X, velocity.Z).Magnitude
+end
+
 local function applyMovementPlaybackSpeed(controller: Controller)
-	if activeController ~= controller
+	if controllers[controller.character] ~= controller
+		or controller.player.Character ~= controller.character
 		or not controller.character.Parent
+		or not controller.rootPart.Parent
 		or controller.humanoid.Health <= 0 then
 		return
 	end
+
+	local actualSpeed = getHorizontalSpeed(controller.rootPart)
 	if controller.humanoid.WalkSpeed <= MovementAnimationConfig.MOVING_SPEED_THRESHOLD
-		or controller.runningSpeed <= MovementAnimationConfig.MOVING_SPEED_THRESHOLD then
+		or actualSpeed <= MovementAnimationConfig.MOVING_SPEED_THRESHOLD then
 		return
 	end
 	local state = controller.humanoid:GetState()
@@ -79,7 +88,7 @@ local function applyMovementPlaybackSpeed(controller: Controller)
 	end
 
 	local playbackSpeed = MovementAnimationConfig.GetPlaybackSpeed(
-		controller.runningSpeed,
+		actualSpeed,
 		controller.humanoid.WalkSpeed
 	)
 	for _, track in ipairs(controller.animator:GetPlayingAnimationTracks()) do
@@ -89,12 +98,14 @@ local function applyMovementPlaybackSpeed(controller: Controller)
 	end
 end
 
-local function setupCharacter(character: Model)
-	setupGeneration += 1
-	local generation = setupGeneration
-	disconnectController()
+local function setupCharacter(player: Player, character: Model, revision: number)
+	disconnectController(character)
 	local humanoidInstance = character:WaitForChild("Humanoid", 10)
-	if not humanoidInstance or not humanoidInstance:IsA("Humanoid") then
+	local rootInstance = character:WaitForChild("HumanoidRootPart", 10)
+	if not humanoidInstance
+		or not humanoidInstance:IsA("Humanoid")
+		or not rootInstance
+		or not rootInstance:IsA("BasePart") then
 		return
 	end
 	local animatorInstance = humanoidInstance:FindFirstChildOfClass("Animator")
@@ -104,7 +115,9 @@ local function setupCharacter(character: Model)
 	end
 	character:WaitForChild("Animate", 5)
 	task.wait()
-	if generation ~= setupGeneration or localPlayer.Character ~= character or not character.Parent then
+	if setupRevisions[player] ~= revision
+		or player.Character ~= character
+		or not character.Parent then
 		return
 	end
 
@@ -116,18 +129,15 @@ local function setupCharacter(character: Model)
 	end
 
 	local controller: Controller = {
+		player = player,
 		character = character,
 		humanoid = humanoidInstance,
+		rootPart = rootInstance,
 		animator = animatorInstance,
-		runningSpeed = 0,
 		movementAnimationIds = movementAnimationIds,
 		connections = {},
 	}
-	activeController = controller
-	table.insert(controller.connections, humanoidInstance.Running:Connect(function(speed)
-		controller.runningSpeed = speed
-		task.defer(applyMovementPlaybackSpeed, controller)
-	end))
+	controllers[character] = controller
 	table.insert(controller.connections, animatorInstance.AnimationPlayed:Connect(function(_track)
 		task.defer(applyMovementPlaybackSpeed, controller)
 	end))
@@ -136,27 +146,58 @@ local function setupCharacter(character: Model)
 			controller.movementAnimationIds[descendant.AnimationId] = true
 		end
 	end))
-	-- Connect after the character's Animate script has initialized so this is the
-	-- final locomotion speed adjustment made for the current animation frame.
-	table.insert(controller.connections, RunService.PreAnimation:Connect(function()
-		applyMovementPlaybackSpeed(controller)
-	end))
 	table.insert(controller.connections, character.Destroying:Connect(function()
-		if activeController == controller then
-			disconnectController()
-		end
+		disconnectController(character)
 	end))
 end
 
-localPlayer.CharacterAdded:Connect(function(character)
-	task.spawn(setupCharacter, character)
-end)
-localPlayer.CharacterRemoving:Connect(function(character)
-	if activeController and activeController.character == character then
-		setupGeneration += 1
-		disconnectController()
+local function setupPlayer(player: Player)
+	if playerConnections[player] then
+		return
+	end
+	local connections: {RBXScriptConnection} = {}
+	playerConnections[player] = connections
+
+	local function beginCharacterSetup(character: Model)
+		local revision = (setupRevisions[player] or 0) + 1
+		setupRevisions[player] = revision
+		task.spawn(setupCharacter, player, character, revision)
+	end
+
+	table.insert(connections, player.CharacterAdded:Connect(beginCharacterSetup))
+	table.insert(connections, player.CharacterRemoving:Connect(function(character)
+		setupRevisions[player] = (setupRevisions[player] or 0) + 1
+		disconnectController(character)
+	end))
+	if player.Character then
+		beginCharacterSetup(player.Character)
+	end
+end
+
+local function removePlayer(player: Player)
+	local connections = playerConnections[player]
+	playerConnections[player] = nil
+	if connections then
+		for _, connection in ipairs(connections) do
+			connection:Disconnect()
+		end
+	end
+	setupRevisions[player] = nil
+	if player.Character then
+		disconnectController(player.Character)
+	end
+end
+
+for _, player in ipairs(Players:GetPlayers()) do
+	setupPlayer(player)
+end
+Players.PlayerAdded:Connect(setupPlayer)
+Players.PlayerRemoving:Connect(removePlayer)
+
+-- AnimationTrack speed changes are local visual state. Apply them for every
+-- real player so remote avatars look the same as the local avatar on this client.
+RunService.PreAnimation:Connect(function()
+	for _, controller in pairs(controllers) do
+		applyMovementPlaybackSpeed(controller)
 	end
 end)
-if localPlayer.Character then
-	task.spawn(setupCharacter, localPlayer.Character)
-end

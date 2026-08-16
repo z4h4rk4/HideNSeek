@@ -38,7 +38,11 @@ local function classify(animation: Animation, animateTemplate: Instance): string
 	local current: Instance? = animation
 	while current and current ~= animateTemplate.Parent do
 		local name = string.lower(current.Name)
-		if string.find(name, "idle", 1, true) then
+		if string.find(name, "swim", 1, true) then
+			-- LowPolyWaterNpcAnimation owns both swim locomotion tracks. Do not
+			-- accidentally choose swimIdle as the NPC's normal ground idle.
+			return nil
+		elseif string.find(name, "idle", 1, true) then
 			return "Idle"
 		elseif string.find(name, "walk", 1, true) or string.find(name, "run", 1, true) then
 			return "Move"

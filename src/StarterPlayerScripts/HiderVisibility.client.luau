@@ -19,6 +19,7 @@ local CAGED_ATTRIBUTE = Config.CAGED_ATTRIBUTE
 local FORCED_VISIBLE_ATTRIBUTE = Config.FORCED_VISIBLE_ATTRIBUTE
 local NPC_COLOR_HIGHLIGHT_NAME = "NpcColorHighlight"
 local MAP_CONTAINER_NAME = "Map"
+local FLOOR_CONTAINER_NAME = "Floor"
 local WALLS_CONTAINER_NAME = "Walls"
 local VISIBILITY_UPDATE_INTERVAL = 0.05
 local PARAMETERS_CACHE_SECONDS = 0.2
@@ -39,6 +40,7 @@ type Tracker = {
 	castShadows: {[BasePart]: boolean},
 	surfaceLocalTransparencies: {[Decal]: number},
 	highlights: {[Highlight]: boolean},
+	billboards: {[BillboardGui]: boolean},
 	displayTypes: {[Humanoid]: EnumItem},
 	connections: {RBXScriptConnection},
 }
@@ -90,6 +92,11 @@ local function hideObject(tracker: Tracker, object: Instance, hiddenAlpha: numbe
 			tracker.highlights[object] = object.Enabled
 		end
 		object.Enabled = tracker.highlights[object] == true and alpha < 0.99
+	elseif object:IsA("BillboardGui") then
+		if tracker.billboards[object] == nil then
+			tracker.billboards[object] = object.Enabled
+		end
+		object.Enabled = tracker.billboards[object] == true and alpha < 0.99
 	elseif object:IsA("Humanoid") then
 		if tracker.displayTypes[object] == nil then
 			tracker.displayTypes[object] = object.DisplayDistanceType
@@ -131,6 +138,12 @@ local function restoreObject(tracker: Tracker, object: Instance)
 			object.Enabled = enabled
 			tracker.highlights[object] = nil
 		end
+	elseif object:IsA("BillboardGui") then
+		local enabled = tracker.billboards[object]
+		if enabled ~= nil then
+			object.Enabled = enabled
+			tracker.billboards[object] = nil
+		end
 	elseif object:IsA("Humanoid") then
 		local displayType = tracker.displayTypes[object]
 		if displayType ~= nil then
@@ -168,6 +181,11 @@ local function restoreAll(tracker: Tracker)
 			highlight.Enabled = enabled
 		end
 	end
+	for billboard, enabled in pairs(tracker.billboards) do
+		if billboard.Parent then
+			billboard.Enabled = enabled
+		end
+	end
 	for humanoid, displayType in pairs(tracker.displayTypes) do
 		if humanoid.Parent then
 			humanoid.DisplayDistanceType = displayType :: any
@@ -177,6 +195,7 @@ local function restoreAll(tracker: Tracker)
 	table.clear(tracker.castShadows)
 	table.clear(tracker.surfaceLocalTransparencies)
 	table.clear(tracker.highlights)
+	table.clear(tracker.billboards)
 	table.clear(tracker.displayTypes)
 	tracker.hidden = false
 	tracker.hiddenAlpha = 0
@@ -261,6 +280,13 @@ local function getLineOfSightParameters(): RaycastParams
 	for _, player in ipairs(Players:GetPlayers()) do
 		if player.Character then
 			table.insert(excluded, player.Character)
+		end
+	end
+	for _, descendant in ipairs(Workspace:GetDescendants()) do
+		if descendant.Name == FLOOR_CONTAINER_NAME
+			and descendant.Parent
+			and descendant.Parent.Name == MAP_CONTAINER_NAME then
+			table.insert(excluded, descendant)
 		end
 	end
 
@@ -502,6 +528,7 @@ local function trackModel(model: Model)
 		castShadows = {},
 		surfaceLocalTransparencies = {},
 		highlights = {},
+		billboards = {},
 		displayTypes = {},
 		connections = {},
 	}

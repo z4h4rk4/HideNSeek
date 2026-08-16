@@ -1,0 +1,50 @@
+--!strict
+
+return table.freeze({
+	-- Empty Tool placed in the first hotbar slot.
+	WEAPON_MODEL_NAME = "Fists",
+	TOOLTIP = "Fists",
+	RIGHT_PUNCH_ANIMATION_NAME = "RightPunch",
+	LEFT_PUNCH_ANIMATION_NAME = "LeftPunch",
+	HIT_REACTION_ANIMATION_NAME = "HeadHit",
+
+	-- Attack timing and server hit validation.
+	ATTACK_COOLDOWN_SECONDS = 0.3,
+	CLIENT_COOLDOWN_BUFFER_SECONDS = 0.05,
+	HIT_DELAY_SECONDS = 0.12,
+	HIT_WINDOW_DURATION_SECONDS = 0.22,
+	RANGE_STUDS = 5.5,
+	SERVER_RANGE_FORGIVENESS_MULTIPLIER = 1.12,
+	MAX_VERTICAL_DIFFERENCE = 1.5,
+	MIN_TARGET_FORWARD_DOT = 0.15,
+	MIN_ATTACK_DIRECTION_LOOK_DOT = 0.35,
+
+	-- Confirmed-hit combo. The count is shared by everyone hitting the same target.
+	HIT_SOUND_TEMPLATE_NAMES = table.freeze({ "PunchSound1", "PunchSound2" }),
+	HIT_COUNT_ATTRIBUTE = "FistHitCount",
+	HITS_TO_KNOCKDOWN = 4,
+	HIT_DECAY_DELAY_SECONDS = 3,
+	HIT_DECAY_INTERVAL_SECONDS = 2,
+	KNOCKDOWN_DURATION_SECONDS = 1,
+
+	-- Overhead confirmed-hit counter.
+	HIT_COUNTER_GUI_NAME = "FistHitCounter",
+	HIT_COUNTER_HEIGHT_OFFSET_STUDS = 3.5,
+	HIT_COUNTER_MAX_DISTANCE_STUDS = 80,
+
+	-- Animation playback.
+	ATTACK_FADE_SECONDS = 0.05,
+	ATTACK_ANIMATION_SPEED = 1,
+	ATTACK_ANIMATION_PRIORITY = Enum.AnimationPriority.Action,
+	HIT_REACTION_FADE_SECONDS = 0.04,
+	HIT_REACTION_ANIMATION_SPEED = 1,
+	HIT_REACTION_ANIMATION_PRIORITY = Enum.AnimationPriority.Action4,
+	HIT_REACTION_FALLBACK_LIFETIME_SECONDS = 2,
+
+	-- Optional NPCWeapons tuning for this Tool.
+	NPC_WEIGHT = 7,
+	NPC_ATTACK_CHANCE = 0.72,
+	NPC_MIN_RANGE_STUDS = 0,
+	NPC_COOLDOWN_MIN_SECONDS = 3.5,
+	NPC_COOLDOWN_MAX_SECONDS = 5.5,
+})

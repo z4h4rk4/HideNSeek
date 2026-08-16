@@ -48,7 +48,7 @@ local function createSound(rootPart: BasePart): Sound
 		sound.RollOffMinDistance = HiderConfig.SEEKER_AGGRO_SOUND_ROLLOFF_MIN_DISTANCE
 		sound.RollOffMaxDistance = HiderConfig.SEEKER_AGGRO_SOUND_ROLLOFF_MAX_DISTANCE
 	end
-	sound.Name = "HunterAggroSound"
+	sound.Name = HiderConfig.SEEKER_AGGRO_SOUND_TEMPLATE_NAME .. "Playback"
 	sound.Looped = false
 	sound.PlayOnRemove = false
 	sound.Parent = rootPart

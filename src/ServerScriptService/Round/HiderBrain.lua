@@ -92,6 +92,7 @@ local seekerTargetSerial = 0
 
 local TURN_ATTACHMENT_NAME = "NpcSmoothTurnAttachment"
 local TURN_ORIENTATION_NAME = "NpcSmoothTurnOrientation"
+local NPC_WEAPON_BUSY_ATTRIBUTE = "NpcWeaponBusy"
 
 local function planarDistance(left: Vector3, right: Vector3): number
 	return Vector2.new(left.X - right.X, left.Z - right.Z).Magnitude
@@ -717,6 +718,7 @@ local function updateGeometryDiagnostics(
 	local stats = HiderVisibilityGraph.GetStats(geometry)
 	controller.npc:SetAttribute("AIMapName", geometry.map:GetFullName())
 	controller.npc:SetAttribute("AIWallCount", stats.walls)
+	controller.npc:SetAttribute("AIRampCount", stats.ramps)
 	controller.npc:SetAttribute("AIGraphNodes", stats.nodes)
 	controller.npc:SetAttribute("AIGraphEdges", stats.edges)
 end
@@ -1341,6 +1343,7 @@ function HiderBrain.New(npc: Model): Controller?
 	npc:SetAttribute("AIStallReason", "")
 	npc:SetAttribute("AIMapName", "")
 	npc:SetAttribute("AIWallCount", 0)
+	npc:SetAttribute("AIRampCount", 0)
 	npc:SetAttribute("AIGraphNodes", 0)
 	npc:SetAttribute("AIGraphEdges", 0)
 	npc:SetAttribute("AIPathWaypoints", 0)
@@ -1482,6 +1485,12 @@ function HiderBrain.Step(controller: Controller)
 	end
 	if controller.npc:GetAttribute(BatAttackConfig.KNOCKDOWN_ATTRIBUTE) == true
 		or controller.humanoid.PlatformStand then
+		controller.humanoid:Move(Vector3.zero, false)
+		return
+	end
+	-- NPCWeapons owns facing for the short equip/attack window. When that
+	-- optional system is absent this attribute is never set and this is a no-op.
+	if controller.npc:GetAttribute(NPC_WEAPON_BUSY_ATTRIBUTE) == true then
 		controller.humanoid:Move(Vector3.zero, false)
 		return
 	end

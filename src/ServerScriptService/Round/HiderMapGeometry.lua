@@ -16,11 +16,20 @@ export type Rectangle = {
 	area: number,
 }
 
+export type Ramp = {
+	part: BasePart,
+	floor: Rectangle,
+	bottomPortal: Vector2,
+	topPortal: Vector2,
+}
+
 export type ArenaGeometry = {
 	map: Instance,
 	arena: Instance,
 	floors: {Rectangle},
 	obstacles: {Rectangle},
+	ramps: {Ramp},
+	wallCount: number,
 	totalFloorArea: number,
 	minX: number,
 	maxX: number,
@@ -113,6 +122,115 @@ local function makeRectangle(part: BasePart, obstacle: boolean): Rectangle?
 	}
 end
 
+local function makeRampSideObstacle(
+	part: BasePart,
+	cframe: CFrame,
+	halfLength: number
+): Rectangle
+	local hardAddition = HiderConfig.BODY_RADIUS
+	local navAddition = HiderConfig.BODY_RADIUS + HiderConfig.SAFETY_MARGIN
+	return {
+		part = part,
+		cframe = cframe,
+		halfX = halfLength,
+		halfZ = 0,
+		hardHalfX = halfLength + hardAddition,
+		hardHalfZ = hardAddition,
+		navHalfX = halfLength + navAddition,
+		navHalfZ = navAddition,
+		area = 0,
+	}
+end
+
+local function makeRamp(part: BasePart): (Ramp?, {Rectangle})
+	if not part.CanCollide then
+		warn(`HiderMapGeometry: skipped ramp {part:GetFullName()}; ramp parts must have CanCollide enabled`)
+		return nil, {}
+	end
+	local upVector = part.CFrame.UpVector
+	if upVector.Y < HiderConfig.MIN_RAMP_UP_VECTOR_Y then
+		warn(`HiderMapGeometry: skipped ramp {part:GetFullName()}; the slope is too steep`)
+		return nil, {}
+	end
+
+	local rightVector = part.CFrame.RightVector
+	local lookVector = part.CFrame.LookVector
+	local rightRise = math.abs(rightVector.Y) * part.Size.X
+	local lookRise = math.abs(lookVector.Y) * part.Size.Z
+	local slopeAxis: Vector3
+	local slopeSize: number
+	local widthSize: number
+	if rightRise >= lookRise then
+		slopeAxis = rightVector
+		slopeSize = part.Size.X
+		widthSize = part.Size.Z
+	else
+		slopeAxis = lookVector
+		slopeSize = part.Size.Z
+		widthSize = part.Size.X
+	end
+	local rise = math.abs(slopeAxis.Y) * slopeSize
+	if rise < HiderConfig.MIN_RAMP_RISE then
+		warn(`HiderMapGeometry: skipped ramp {part:GetFullName()}; the part is not tilted`)
+		return nil, {}
+	end
+	if slopeAxis.Y < 0 then
+		slopeAxis = -slopeAxis
+	end
+
+	local slopeDirection = Vector2.new(slopeAxis.X, slopeAxis.Z)
+	local horizontalScale = slopeDirection.Magnitude
+	if horizontalScale <= HiderConfig.GEOMETRY_EPSILON then
+		warn(`HiderMapGeometry: skipped ramp {part:GetFullName()}; it has no horizontal slope span`)
+		return nil, {}
+	end
+	slopeDirection /= horizontalScale
+	local widthDirection = Vector2.new(-slopeDirection.Y, slopeDirection.X)
+	local halfLength = slopeSize * horizontalScale * 0.5
+	local halfWidth = widthSize * 0.5
+	if halfLength < HiderConfig.MIN_GEOMETRY_SIZE
+		or halfWidth <= HiderConfig.BODY_RADIUS + HiderConfig.GEOMETRY_EPSILON then
+		warn(`HiderMapGeometry: skipped ramp {part:GetFullName()}; it is too small for an NPC`)
+		return nil, {}
+	end
+
+	local slopeWorld = Vector3.new(slopeDirection.X, 0, slopeDirection.Y)
+	local widthWorld = Vector3.new(widthDirection.X, 0, widthDirection.Y)
+	local footprintCFrame = CFrame.fromMatrix(
+		part.Position,
+		slopeWorld,
+		Vector3.yAxis,
+		widthWorld
+	)
+	local floor: Rectangle = {
+		part = part,
+		cframe = footprintCFrame,
+		halfX = halfLength,
+		halfZ = halfWidth,
+		hardHalfX = halfLength,
+		hardHalfZ = halfWidth,
+		navHalfX = halfLength,
+		navHalfZ = halfWidth,
+		-- Ramps extend navigable coverage but are not selected as idle wander
+		-- destinations. NPCs use them only when a route crosses the surface.
+		area = 0,
+	}
+	local inset = math.min(HiderConfig.RAMP_PORTAL_INSET, halfLength * 0.25)
+	local center = Vector2.new(part.Position.X, part.Position.Z)
+	local portalOffset = slopeDirection * (halfLength - inset)
+	local leftSide = footprintCFrame * CFrame.new(0, 0, -halfWidth)
+	local rightSide = footprintCFrame * CFrame.new(0, 0, halfWidth)
+	return {
+		part = part,
+		floor = floor,
+		bottomPortal = center - portalOffset,
+		topPortal = center + portalOffset,
+	}, {
+		makeRampSideObstacle(part, leftSide, halfLength),
+		makeRampSideObstacle(part, rightSide, halfLength),
+	}
+end
+
 local function rectangleCorners(rectangle: Rectangle, halfX: number, halfZ: number): {Vector2}
 	local corners: {Vector2} = {}
 	for _, signs in ipairs({
@@ -169,12 +287,14 @@ local function rebuildCache()
 		end
 		local floorContainer = instance:FindFirstChild(HiderConfig.MAP_FLOOR_NAME)
 		local wallsContainer = instance:FindFirstChild(HiderConfig.MAP_WALLS_NAME)
+		local rampsContainer = instance:FindFirstChild(HiderConfig.MAP_RAMPS_NAME)
 		if not floorContainer or not wallsContainer then
 			continue
 		end
 
 		local floors: {Rectangle} = {}
 		local obstacles: {Rectangle} = {}
+		local ramps: {Ramp} = {}
 		local totalFloorArea = 0
 		local minX = math.huge
 		local maxX = -math.huge
@@ -203,6 +323,26 @@ local function rebuildCache()
 				trackPart(part)
 			end
 		end
+		if rampsContainer then
+			for _, part in ipairs(collectParts(rampsContainer)) do
+				local ramp, sideObstacles = makeRamp(part)
+				if ramp then
+					table.insert(ramps, ramp)
+					table.insert(floors, ramp.floor)
+					for _, sideObstacle in ipairs(sideObstacles) do
+						table.insert(obstacles, sideObstacle)
+					end
+					minX, maxX, minZ, maxZ = updateExtents(
+						minX,
+						maxX,
+						minZ,
+						maxZ,
+						ramp.floor
+					)
+					trackPart(part)
+				end
+			end
+		end
 
 		if #floors > 0 and totalFloorArea > 0 then
 			table.insert(rebuilt, {
@@ -210,6 +350,8 @@ local function rebuildCache()
 				arena = instance.Parent or Workspace,
 				floors = floors,
 				obstacles = obstacles,
+				ramps = ramps,
+				wallCount = #obstacles - #ramps * 2,
 				totalFloorArea = totalFloorArea,
 				minX = minX,
 				maxX = maxX,

@@ -16,7 +16,6 @@ local PHASE_STARTING = RoundConfig.PHASE_STARTING
 local PHASE_ROUND = RoundConfig.PHASE_ROUND
 
 local KIND_SMOKE = "Smoke"
-local KIND_FART = "Fart"
 local KIND_LEAK = "Leak"
 
 local LEAK_NAMES: {[string]: boolean} = table.freeze({
@@ -32,10 +31,6 @@ local SIGNAL_SETTINGS: {[string]: SignalSettings} = {
 	[KIND_SMOKE] = {
 		duration = 1.75,
 		priority = 1,
-	},
-	[KIND_FART] = {
-		duration = 4,
-		priority = 2,
 	},
 	[KIND_LEAK] = {
 		duration = LeakConfig.TRAIL_DURATION_SECONDS,
@@ -74,7 +69,6 @@ export type Target = {
 
 local HiderEvidenceService = {
 	KIND_SMOKE = KIND_SMOKE,
-	KIND_FART = KIND_FART,
 	KIND_LEAK = KIND_LEAK,
 }
 
@@ -212,7 +206,7 @@ function HiderEvidenceService.Emit(
 		records = {}
 		evidenceByOwner[character] = records
 	end
-	-- Smoke and Fart refresh one signal. Every Leak footprint stays independent,
+	-- Smoke refreshes one signal. Every Leak footprint stays independent,
 	-- allowing a nearby Seeker to discover any still-visible part of the trail.
 	local recordKey = if kind == KIND_LEAK then `{kind}:{nextSerial}` else kind
 	records[recordKey] = {

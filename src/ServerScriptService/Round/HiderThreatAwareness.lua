@@ -11,6 +11,7 @@ local HiderMapGeometry = require(script.Parent:WaitForChild("HiderMapGeometry"))
 local NPC_FOLDER_NAME = "RoundNPCs"
 local ROLE_ATTRIBUTE = "RoundRole"
 local ROLE_HIDER = "Hider"
+local FLOOR_CONTAINER_NAME = "Floor"
 local WALLS_CONTAINER_NAME = "Walls"
 local LINE_OF_SIGHT_PARAMETERS_CACHE_SECONDS = 0.2
 
@@ -119,6 +120,12 @@ local function getLineOfSightParameters(): RaycastParams
 	for _, player in ipairs(Players:GetPlayers()) do
 		if player.Character then
 			table.insert(excluded, player.Character)
+		end
+	end
+	for _, geometry in ipairs(HiderMapGeometry.GetAll()) do
+		local floorContainer = geometry.map:FindFirstChild(FLOOR_CONTAINER_NAME)
+		if floorContainer then
+			table.insert(excluded, floorContainer)
 		end
 	end
 

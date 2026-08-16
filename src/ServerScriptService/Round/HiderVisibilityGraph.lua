@@ -19,6 +19,7 @@ export type GraphStats = {
 	nodes: number,
 	edges: number,
 	walls: number,
+	ramps: number,
 }
 
 local HiderVisibilityGraph = {}
@@ -97,6 +98,10 @@ local function buildNodes(geometry: HiderMapGeometry.ArenaGeometry): {Vector2}
 			appendUniqueNode(nodes, geometry, corner)
 		end
 		table.insert(boundaries, HiderMapGeometry.GetNavigationBoundary(obstacle))
+	end
+	for _, ramp in ipairs(geometry.ramps) do
+		appendUniqueNode(nodes, geometry, ramp.bottomPortal)
+		appendUniqueNode(nodes, geometry, ramp.topPortal)
 	end
 
 	-- Overlapping and joined rectangles create union-outline corners at edge
@@ -376,7 +381,8 @@ function HiderVisibilityGraph.GetStats(
 	return {
 		nodes = #graph.nodes,
 		edges = graph.edgeCount,
-		walls = #geometry.obstacles,
+		walls = geometry.wallCount,
+		ramps = #geometry.ramps,
 	}
 end
 

@@ -15,6 +15,12 @@ local tagConnections: {RBXScriptConnection} = {}
 local started = false
 local pickupRemote: RemoteEvent? = nil
 
+local ROUND_STATE_NAME = "RoundState"
+local PHASE_STARTING = "Starting"
+local PHASE_ROUND = "Round"
+local ROLE_HIDER = "Hider"
+local ROLE_SEEKER = "Seeker"
+
 local function getOrCreatePickupRemote(): RemoteEvent
 	local existing = ReplicatedStorage:FindFirstChild(CollectibleConfig.PICKUP_REMOTE_NAME)
 	if existing then
@@ -54,7 +60,16 @@ local function getPlayerFromHit(hit: BasePart): (Player?, Model?)
 	return player, character
 end
 
-local function canCollect(collectible: Instance, character: Model): boolean
+local function canCollect(player: Player, collectible: Instance, character: Model): boolean
+	local roundState = ReplicatedStorage:FindFirstChild(ROUND_STATE_NAME)
+	local role = player:GetAttribute("RoundRole")
+	local phase = if roundState then roundState:GetAttribute("Phase") else nil
+	if not roundState
+		or (phase ~= PHASE_STARTING and phase ~= PHASE_ROUND)
+		or (role ~= ROLE_HIDER and role ~= ROLE_SEEKER) then
+		return false
+	end
+
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	local rootPart = character:FindFirstChild("HumanoidRootPart")
 	if not humanoid or humanoid.Health <= 0 or not rootPart or not rootPart:IsA("BasePart") then
@@ -74,7 +89,7 @@ local function collect(collectible: Instance, collectibleType, hit: BasePart)
 	end
 
 	local player, character = getPlayerFromHit(hit)
-	if not player or not character or not canCollect(collectible, character) then
+	if not player or not character or not canCollect(player, collectible, character) then
 		return
 	end
 

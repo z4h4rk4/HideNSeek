@@ -5,9 +5,26 @@ local TEMPLATE_NAME = "GoldBar"
 local SPAWN_AREA_NAME = "GoldenBarSpawnArea"
 local VISUAL_TAG = "ClientSpinningGoldBar"
 local GENERATED_FOLDER_NAME = "SpawnedGoldBars"
+local populatedSpawnAreas = {}
 
 local function isGoldBarObject(object: Instance): boolean
 	return object:IsA("BasePart") or object:IsA("Model")
+end
+
+local function isTopLevelSpawnArea(object: Instance): boolean
+	if object.Name ~= SPAWN_AREA_NAME
+		or (not object:IsA("Model") and not object:IsA("Folder")) then
+		return false
+	end
+	local ancestor = object.Parent
+	while ancestor and ancestor ~= workspace do
+		if ancestor.Name == SPAWN_AREA_NAME
+			and (ancestor:IsA("Model") or ancestor:IsA("Folder")) then
+			return false
+		end
+		ancestor = ancestor.Parent
+	end
+	return true
 end
 
 local goldBarTemplate = ServerStorage:WaitForChild(TEMPLATE_NAME)
@@ -33,25 +50,8 @@ local function findSpawnAreas(): { Instance }
 	local spawnAreas = {}
 
 	for _, object in ipairs(workspace:GetDescendants()) do
-		if object.Name == SPAWN_AREA_NAME and (object:IsA("Model") or object:IsA("Folder")) then
-			local ancestor = object.Parent
-			local isNestedSpawnArea = false
-
-			while ancestor and ancestor ~= workspace do
-				if
-					ancestor.Name == SPAWN_AREA_NAME
-					and (ancestor:IsA("Model") or ancestor:IsA("Folder"))
-				then
-					isNestedSpawnArea = true
-					break
-				end
-
-				ancestor = ancestor.Parent
-			end
-
-			if not isNestedSpawnArea then
-				table.insert(spawnAreas, object)
-			end
+		if isTopLevelSpawnArea(object) then
+			table.insert(spawnAreas, object)
 		end
 	end
 
@@ -105,6 +105,13 @@ local function placeGoldBarAtMarker(marker: BasePart, goldBarsFolder: Folder)
 end
 
 local function populateSpawnArea(spawnArea: Instance)
+	if populatedSpawnAreas[spawnArea] or not isTopLevelSpawnArea(spawnArea) then
+		return
+	end
+	populatedSpawnAreas[spawnArea] = true
+	spawnArea.Destroying:Once(function()
+		populatedSpawnAreas[spawnArea] = nil
+	end)
 	local markers = {}
 
 	for _, object in ipairs(spawnArea:GetDescendants()) do
@@ -131,10 +138,20 @@ clearPreviouslySpawnedGoldBars()
 
 local spawnAreas = findSpawnAreas()
 if #spawnAreas == 0 then
-	warn(`GoldBarSpawner: no {SPAWN_AREA_NAME} models found inside the arenas`)
-	return
+	print(`GoldBarSpawner: waiting for runtime arena {SPAWN_AREA_NAME} models`)
 end
 
 for _, spawnArea in ipairs(spawnAreas) do
 	populateSpawnArea(spawnArea)
 end
+
+workspace.DescendantAdded:Connect(function(descendant)
+	if descendant.Name ~= SPAWN_AREA_NAME then
+		return
+	end
+	task.defer(function()
+		if descendant:IsDescendantOf(workspace) then
+			populateSpawnArea(descendant)
+		end
+	end)
+end)

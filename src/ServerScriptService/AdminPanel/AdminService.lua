@@ -9,6 +9,9 @@ local Validation = require(script.Parent:WaitForChild("AdminValidationCore"))
 local CurrencyService = require(
 	script.Parent.Parent:WaitForChild("Currency"):WaitForChild("CurrencyService")
 )
+local CooldownPassService = require(
+	script.Parent.Parent:WaitForChild("WeaponShop"):WaitForChild("CooldownPassService")
+)
 local roundModules = script.Parent.Parent:WaitForChild("Round")
 local RoundConfig = require(roundModules:WaitForChild("RoundConfig"))
 local RoundControl = require(roundModules:WaitForChild("RoundControl"))
@@ -41,6 +44,13 @@ local ROLE_KEYS = table.freeze({
 	Sequence = true,
 	TargetUserId = true,
 	Role = true,
+})
+local COOLDOWN_PASS_TEST_KEYS = table.freeze({
+	Action = true,
+	RequestId = true,
+	Sequence = true,
+	TargetUserId = true,
+	State = true,
 })
 local GLOBAL_KEYS = table.freeze({
 	Action = true,
@@ -83,6 +93,12 @@ local ACTION_SCHEMAS: {[string]: Schema} = table.freeze({
 	GetSnapshot = { Keys = TARGET_KEYS, NeedsTarget = true, Mutation = false },
 	AddCoins = { Keys = AMOUNT_KEYS, NeedsTarget = true, Mutation = true },
 	RemoveCoins = { Keys = AMOUNT_KEYS, NeedsTarget = true, Mutation = true },
+	ResetWeaponPurchases = { Keys = TARGET_KEYS, NeedsTarget = true, Mutation = true },
+	SetCooldownPassTestState = {
+		Keys = COOLDOWN_PASS_TEST_KEYS,
+		NeedsTarget = true,
+		Mutation = true,
+	},
 	SaveProfile = { Keys = TARGET_KEYS, NeedsTarget = true, Mutation = true },
 	SetRole = { Keys = ROLE_KEYS, NeedsTarget = true, Mutation = true },
 	RespawnPlayer = { Keys = TARGET_KEYS, NeedsTarget = true, Mutation = true },
@@ -118,6 +134,11 @@ local VALID_PLAYER_ROLES: {[string]: boolean} = table.freeze({
 local VALID_NPC_ROLES: {[string]: boolean} = table.freeze({
 	Hider = true,
 	Seeker = true,
+})
+local VALID_COOLDOWN_PASS_TEST_STATES: {[string]: boolean} = table.freeze({
+	Owned = true,
+	Unowned = true,
+	Roblox = true,
 })
 
 local function response(ok: boolean, reason: string?, message: string, snapshot: any?, data: any?)
@@ -285,6 +306,7 @@ local function buildSnapshot(target: Player): {[string]: any}
 		MaxHealth = if humanoid then humanoid.MaxHealth else 0,
 		WalkSpeed = if humanoid then humanoid.WalkSpeed else 0,
 		CharacterScale = if character then character:GetScale() else 0,
+		CooldownPass = CooldownPassService.GetState(target),
 		Round = roundSnapshot(),
 	}
 end
@@ -428,6 +450,76 @@ function AdminService.HandleRequest(admin: Player, payload: any)
 			safeBuildSnapshot(targetPlayer),
 			nil
 		)
+	end
+
+	if action == "ResetWeaponPurchases" then
+		local targetPlayer = target :: Player
+		local reset, removedCount, resetError = CurrencyService.ResetOwnedWeapons(
+			targetPlayer,
+			"FounderAdmin:ResetWeaponPurchases"
+		)
+		if not reset then
+			return failure(resetError, "Weapon purchases could not be reset.")
+		end
+		local saved, saveError = CurrencyService.SaveNow(targetPlayer)
+		audit(
+			admin,
+			action,
+			targetPlayer,
+			("removed=%d saved=%s saveReason=%s"):format(
+				removedCount,
+				tostring(saved),
+				tostring(saveError)
+			)
+		)
+		local message = if saved
+			then ("Reset %d purchased weapon(s). Fists remain available."):format(removedCount)
+			else ("Reset %d purchased weapon(s); automatic save is still queued."):format(removedCount)
+		return response(true, nil, message, safeBuildSnapshot(targetPlayer), {
+			RemovedWeaponCount = removedCount,
+			SavedImmediately = saved,
+		})
+	end
+
+	if action == "SetCooldownPassTestState" then
+		local targetPlayer = target :: Player
+		if targetPlayer ~= admin then
+			return failure(
+				"PASS_TEST_SELF_ONLY",
+				"Cooldown pass simulation is restricted to your own admin account."
+			)
+		end
+		local state = payload.State
+		if type(state) ~= "string" or not VALID_COOLDOWN_PASS_TEST_STATES[state] then
+			return failure(
+				"INVALID_PASS_TEST_STATE",
+				"Pass test state must be Owned, Unowned, or Roblox."
+			)
+		end
+
+		local override = if state == "Roblox" then nil else state == "Owned"
+		local changed, stateOrReason = CooldownPassService.SetTestOverride(
+			targetPlayer,
+			override
+		)
+		if not changed then
+			return failure(stateOrReason, "The cooldown pass test state could not be changed.")
+		end
+		audit(admin, action, targetPlayer, ("state=%s"):format(state))
+
+		local message
+		if state == "Owned" then
+			message = "Cooldown pass simulated as owned for this server."
+		elseif state == "Unowned" then
+			message = "Cooldown pass simulated as not owned for this server."
+		elseif stateOrReason.RealOwnershipReady then
+			message = "Restored verified Roblox cooldown pass ownership."
+		else
+			message = "Restored Roblox ownership mode; verification is still pending."
+		end
+		return response(true, nil, message, safeBuildSnapshot(targetPlayer), {
+			CooldownPass = stateOrReason,
+		})
 	end
 
 	if action == "SaveProfile" then

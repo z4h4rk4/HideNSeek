@@ -29,6 +29,8 @@ local TARGET_ACTIONS = {
 	GetSnapshot = true,
 	AddCoins = true,
 	RemoveCoins = true,
+	ResetWeaponPurchases = true,
+	SetCooldownPassTestState = true,
 	SaveProfile = true,
 	SetRole = true,
 	RespawnPlayer = true,
@@ -522,12 +524,64 @@ local removeCoinsButton = makeButton(
 	UDim2.new(0.5, 6, 0, 126),
 	UDim2.new(0.5, -22, 0, 42)
 )
+local weaponPurchasesCard = makeCard(
+	pages.Economy,
+	"Weapon Purchases",
+	"Clears saved Bat, Cage, and Trash Can ownership. Free Fists remain available.",
+	126,
+	3
+)
+local resetWeaponPurchasesButton = makeButton(
+	weaponPurchasesCard,
+	"Reset Purchased Weapons",
+	COLORS.orange,
+	UDim2.fromOffset(16, 70),
+	UDim2.new(1, -32, 0, 40)
+)
+local cooldownPassCard = makeCard(
+	pages.Economy,
+	"Cooldown Pass Test",
+	"Your admin account only. Temporary; never grants or revokes the real Roblox pass.",
+	174,
+	4
+)
+local cooldownPassStatusLabel = addLabel(
+	cooldownPassCard,
+	"Pass state: loading...",
+	UDim2.fromOffset(16, 66),
+	UDim2.new(1, -32, 0, 34),
+	Enum.Font.GothamMedium,
+	11,
+	COLORS.text
+)
+cooldownPassStatusLabel.TextWrapped = true
+local simulateNoPassButton = makeButton(
+	cooldownPassCard,
+	"NO PASS",
+	COLORS.red,
+	UDim2.fromOffset(16, 106),
+	UDim2.new(1 / 3, -19, 0, 42)
+)
+local simulateOwnedPassButton = makeButton(
+	cooldownPassCard,
+	"OWNED",
+	COLORS.green,
+	UDim2.new(1 / 3, 4, 0, 106),
+	UDim2.new(1 / 3, -14, 0, 42)
+)
+local restorePassOwnershipButton = makeButton(
+	cooldownPassCard,
+	"ROBLOX",
+	COLORS.blue,
+	UDim2.new(2 / 3, 2, 0, 106),
+	UDim2.new(1 / 3, -18, 0, 42)
+)
 local saveCard = makeCard(
 	pages.Economy,
 	"Profile Persistence",
 	"Request an immediate DataStore save for the selected loaded profile.",
 	126,
-	3
+	5
 )
 local saveProfileButton = makeButton(
 	saveCard,
@@ -797,6 +851,10 @@ local requestButtons = {
 	loadButton,
 	addCoinsButton,
 	removeCoinsButton,
+	resetWeaponPurchasesButton,
+	simulateNoPassButton,
+	simulateOwnedPassButton,
+	restorePassOwnershipButton,
 	saveProfileButton,
 	hiderButton,
 	seekerButton,
@@ -856,6 +914,7 @@ local function updateSnapshot(nextSnapshot)
 		targetSummary.Text = "No target snapshot loaded."
 		playerStatusLabel.Text = "No snapshot loaded."
 		roundStatusLabel.Text = "Round state unavailable."
+		cooldownPassStatusLabel.Text = "Pass state unavailable."
 		updateHunterRoleButton()
 		return
 	end
@@ -892,6 +951,21 @@ local function updateSnapshot(nextSnapshot)
 		tonumber(snapshot.CharacterScale) or 0,
 		coinsText
 	)
+
+	local cooldownPass = snapshot.CooldownPass
+	if type(cooldownPass) == "table" then
+		local realStatus = if cooldownPass.RealOwnershipReady
+			then (if cooldownPass.RealOwned then "owned" else "not owned")
+			else "checking"
+		local effectiveStatus = if cooldownPass.EffectiveOwned then "owned" else "not owned"
+		cooldownPassStatusLabel.Text = ("Mode: %s  ·  Effective: %s  ·  Roblox: %s"):format(
+			tostring(cooldownPass.TestMode or "Roblox"),
+			effectiveStatus,
+			realStatus
+		)
+	else
+		cooldownPassStatusLabel.Text = "Pass state unavailable."
+	end
 
 	local round = snapshot.Round
 	if type(round) == "table" then
@@ -1178,6 +1252,18 @@ bindConfirmedAction(
 		return amountInput.Text
 	end
 )
+bindConfirmedAction(resetWeaponPurchasesButton, function()
+	sendRequest("ResetWeaponPurchases")
+end)
+simulateNoPassButton.Activated:Connect(function()
+	sendRequest("SetCooldownPassTestState", { State = "Unowned" })
+end)
+simulateOwnedPassButton.Activated:Connect(function()
+	sendRequest("SetCooldownPassTestState", { State = "Owned" })
+end)
+restorePassOwnershipButton.Activated:Connect(function()
+	sendRequest("SetCooldownPassTestState", { State = "Roblox" })
+end)
 saveProfileButton.Activated:Connect(function()
 	sendRequest("SaveProfile")
 end)

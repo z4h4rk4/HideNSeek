@@ -7,9 +7,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local SeekerSearchConfig = require(ReplicatedStorage:WaitForChild("SeekerSearchConfig"))
 
 local SMOKE_CLIENT_ASSET_NAME = "RandomSmokeTemplate"
-local FART_CLIENT_ASSET_NAME = "FartTemplate"
 local REMOTE_NAME = "RandomSmokeTriggered"
-local FART_EFFECT_KIND = "Fart"
+local SMOKE_EFFECT_KIND = "Smoke"
 local MANAGED_NPC_ATTRIBUTE = "ManagedRoundNPC"
 local ROLE_ATTRIBUTE = "RoundRole"
 local HIDER_ROLE = "Hider"
@@ -18,7 +17,6 @@ local DEFAULT_EMIT_COUNT = 1
 local CLEANUP_PADDING_SECONDS = 0.5
 
 local smokeTemplate = ReplicatedStorage:WaitForChild(SMOKE_CLIENT_ASSET_NAME)
-local fartTemplate = ReplicatedStorage:WaitForChild(FART_CLIENT_ASSET_NAME)
 local smokeRemote = ReplicatedStorage:WaitForChild(REMOTE_NAME)
 if not smokeRemote:IsA("RemoteEvent") then
 	error(`ReplicatedStorage.{REMOTE_NAME} must be a RemoteEvent`)
@@ -151,11 +149,9 @@ local function emitEffect(subject: Instance, template: Instance): BasePart?
 end
 
 smokeRemote.OnClientEvent:Connect(function(subject, effectKind)
-	if typeof(subject) == "Instance" and (subject:IsA("Model") or subject:IsA("Player")) then
-		if effectKind == FART_EFFECT_KIND then
-			emitEffect(subject, fartTemplate)
-		else
-			emitEffect(subject, smokeTemplate)
-		end
+	if effectKind == SMOKE_EFFECT_KIND
+		and typeof(subject) == "Instance"
+		and (subject:IsA("Model") or subject:IsA("Player")) then
+		emitEffect(subject, smokeTemplate)
 	end
 end)

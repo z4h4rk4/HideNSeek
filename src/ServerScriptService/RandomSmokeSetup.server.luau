@@ -1,6 +1,5 @@
 --!strict
 
-local Debris = game:GetService("Debris")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
@@ -13,28 +12,44 @@ local HiderEvidenceService = require(
 
 local SOURCE_FOLDER_NAME = "Smokes"
 local SMOKE_TEMPLATE_NAME = "smoke-01"
-local FART_TEMPLATE_NAME = "fart"
 local SMOKE_CLIENT_ASSET_NAME = "RandomSmokeTemplate"
-local FART_CLIENT_ASSET_NAME = "FartTemplate"
 local REMOTE_NAME = "RandomSmokeTriggered"
 local SMOKE_EFFECT_KIND = "Smoke"
-local FART_EFFECT_KIND = "Fart"
-local FART_SOUND_NAME = "FartSound"
-local MIN_INTERVAL_SECONDS = 3
-local MAX_INTERVAL_SECONDS = 5
-local FART_DELAY_SECONDS = 3
+local LEGACY_FART_TEMPLATE_NAME = "fart"
+local LEGACY_FART_CLIENT_ASSET_NAME = "FartTemplate"
+local LEGACY_FART_SOUND_NAME = "FartSound"
+local SMOKE_TURN_ANGLE_DEGREES = 15
+local SMOKE_TURN_DOT = math.cos(math.rad(SMOKE_TURN_ANGLE_DEGREES))
+local SMOKE_COOLDOWN_SECONDS = 1
 local MOVEMENT_SPEED_THRESHOLD = 0.5
 local TIMER_STEP_SECONDS = 0.1
-local SOUND_FALLBACK_LIFETIME = 30
 local NPC_FOLDER_NAME = "RoundNPCs"
 local MANAGED_NPC_ATTRIBUTE = "ManagedRoundNPC"
 local ROLE_ATTRIBUTE = "RoundRole"
 local HIDER_ROLE = "Hider"
 
+-- Remove obsolete replicated/audio assets even if the Smokes folder itself is
+-- missing from an older place version.
+local legacyFartClientAsset = ReplicatedStorage:FindFirstChild(LEGACY_FART_CLIENT_ASSET_NAME)
+if legacyFartClientAsset then
+	legacyFartClientAsset:Destroy()
+end
+local legacyFartSound = SoundService:FindFirstChild(LEGACY_FART_SOUND_NAME)
+if legacyFartSound then
+	legacyFartSound:Destroy()
+end
+
 local sourceFolder = ServerStorage:WaitForChild(SOURCE_FOLDER_NAME, 10)
 if not sourceFolder then
 	warn(`RandomSmokeSetup: ServerStorage.{SOURCE_FOLDER_NAME} not found`)
 	return
+end
+
+-- Remove obsolete assets from older place versions as soon as the server
+-- starts. The idle fart mechanic no longer exists.
+local legacyFartTemplate = sourceFolder:FindFirstChild(LEGACY_FART_TEMPLATE_NAME)
+if legacyFartTemplate then
+	legacyFartTemplate:Destroy()
 end
 
 local function publishTemplate(sourceName: string, clientName: string): boolean
@@ -55,8 +70,7 @@ local function publishTemplate(sourceName: string, clientName: string): boolean
 	return true
 end
 
-if not publishTemplate(SMOKE_TEMPLATE_NAME, SMOKE_CLIENT_ASSET_NAME)
-	or not publishTemplate(FART_TEMPLATE_NAME, FART_CLIENT_ASSET_NAME) then
+if not publishTemplate(SMOKE_TEMPLATE_NAME, SMOKE_CLIENT_ASSET_NAME) then
 	return
 end
 
@@ -74,11 +88,9 @@ else
 	smokeRemote.Parent = ReplicatedStorage
 end
 
-local random = Random.new()
 type EffectState = {
-	secondsUntilEffect: number,
-	standingSeconds: number,
-	fartPlayed: boolean,
+	lastMoveDirection: Vector3?,
+	nextSmokeAt: number,
 }
 
 local effectStates: {[Model]: EffectState} = {}
@@ -96,7 +108,7 @@ local function isHiderCharacter(character: Model): boolean
 		and character:GetAttribute(ROLE_ATTRIBUTE) == HIDER_ROLE
 end
 
-local function getCharacterMovement(character: Model): (BasePart?, boolean)
+local function getCharacterMovement(character: Model): (BasePart?, boolean, Vector3?)
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	local rootPart = character:FindFirstChild("HumanoidRootPart")
 	if not character.Parent
@@ -104,12 +116,16 @@ local function getCharacterMovement(character: Model): (BasePart?, boolean)
 		or humanoid.Health <= 0
 		or not rootPart
 		or not rootPart:IsA("BasePart") then
-		return nil, false
+		return nil, false, nil
 	end
 
 	local velocity = rootPart.AssemblyLinearVelocity
-	local horizontalSpeed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
-	return rootPart, horizontalSpeed >= MOVEMENT_SPEED_THRESHOLD
+	local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+	local horizontalSpeed = horizontalVelocity.Magnitude
+	if horizontalSpeed < MOVEMENT_SPEED_THRESHOLD then
+		return rootPart, false, nil
+	end
+	return rootPart, true, horizontalVelocity.Unit
 end
 
 local function getHiderCharacters(): {[Model]: boolean}
@@ -132,31 +148,9 @@ local function getHiderCharacters(): {[Model]: boolean}
 	return characters
 end
 
-local function playFartSound(rootPart: BasePart)
-	local soundTemplate = SoundService:FindFirstChild(FART_SOUND_NAME)
-	if not soundTemplate or not soundTemplate:IsA("Sound") then
-		warn(`RandomSmokeSetup: SoundService.{FART_SOUND_NAME} must be a Sound`)
-		return
-	end
-	if soundTemplate.SoundId == "" then
-		warn(`RandomSmokeSetup: SoundService.{FART_SOUND_NAME}.SoundId is empty`)
-		return
-	end
-
-	local sound = soundTemplate:Clone()
-	sound.Name = FART_SOUND_NAME .. "Playback"
-	sound.Looped = false
-	sound.Parent = rootPart
-	sound.Ended:Once(function()
-		sound:Destroy()
-	end)
-	Debris:AddItem(sound, SOUND_FALLBACK_LIFETIME)
-	sound:Play()
-end
-
 task.spawn(function()
 	while true do
-		local elapsed = task.wait(TIMER_STEP_SECONDS)
+		task.wait(TIMER_STEP_SECONDS)
 		local hiderCharacters = getHiderCharacters()
 
 		for character in pairs(effectStates) do
@@ -169,46 +163,35 @@ task.spawn(function()
 			local state = effectStates[character]
 			if not state then
 				state = {
-					secondsUntilEffect = random:NextNumber(MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS),
-					standingSeconds = 0,
-					fartPlayed = false,
+					lastMoveDirection = nil,
+					nextSmokeAt = 0,
 				}
 				effectStates[character] = state
 			end
 
-			local rootPart, isMoving = getCharacterMovement(character)
+			local rootPart, isMoving, moveDirection = getCharacterMovement(character)
 			if not rootPart then
-				state.standingSeconds = 0
-				state.fartPlayed = false
-			elseif isMoving then
-				state.secondsUntilEffect -= elapsed
-				state.standingSeconds = 0
-				state.fartPlayed = false
-
-				if state.secondsUntilEffect <= 0 then
+				state.lastMoveDirection = nil
+			elseif isMoving and moveDirection then
+				local now = Workspace:GetServerTimeNow()
+				local lastDirection = state.lastMoveDirection
+				if lastDirection
+					and lastDirection:Dot(moveDirection) <= SMOKE_TURN_DOT
+					and now >= state.nextSmokeAt then
 					smokeRemote:FireAllClients(character, SMOKE_EFFECT_KIND)
 					HiderEvidenceService.Emit(
 						character,
 						HiderEvidenceService.KIND_SMOKE,
 						rootPart.Position
 					)
-					state.secondsUntilEffect = random:NextNumber(MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS)
+					state.nextSmokeAt = now + SMOKE_COOLDOWN_SECONDS
 				end
-			elseif not state.fartPlayed then
-				state.standingSeconds += elapsed
-				if state.standingSeconds >= FART_DELAY_SECONDS then
-					smokeRemote:FireAllClients(character, FART_EFFECT_KIND)
-					HiderEvidenceService.Emit(
-						character,
-						HiderEvidenceService.KIND_FART,
-						rootPart.Position
-					)
-					playFartSound(rootPart)
-					state.fartPlayed = true
-				end
+				state.lastMoveDirection = moveDirection
+			else
+				state.lastMoveDirection = nil
 			end
 		end
 	end
 end)
 
-print("[RandomSmoke] Hider movement smoke and idle fart effects enabled")
+print(`[RandomSmoke] Hider {SMOKE_TURN_ANGLE_DEGREES}-degree turn smoke enabled`)

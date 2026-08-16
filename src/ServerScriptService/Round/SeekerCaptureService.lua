@@ -15,11 +15,17 @@ local ROUND_ROLE_ATTRIBUTE = "RoundRole"
 local ROLE_HIDER = "Hider"
 local ROLE_SEEKER = "Seeker"
 local PHASE_ROUND = "Round"
+local FLOOR_CONTAINER_NAME = "Floor"
 local WALLS_CONTAINER_NAME = "Walls"
+local RAMPS_CONTAINER_NAME = "Ramps"
+local ARENA_VERTICAL_MARGIN = 15
+-- Keep a small safe margin inside the visible extended sector. The circular
+-- SEARCH_RADIUS remains exact; only the forward bonus is reduced server-side.
+local FORWARD_CAPTURE_INSET_STUDS = 1
 
 export type Callbacks = {
-	CapturePlayer: (Player) -> (),
-	CaptureNpc: (Model) -> (),
+	CapturePlayer: (Player, Instance) -> (),
+	CaptureNpc: (Model, Instance) -> (),
 }
 
 type Actor = {
@@ -91,14 +97,16 @@ end
 local function actorIsInActiveArena(actor: Actor, geometry: ArenaGeometry): boolean
 	local position = actor.rootPart.Position
 	for _, floor in ipairs(geometry.floors) do
-		local localPosition = floor.cframe:PointToObjectSpace(Vector3.new(
+		local planarPosition = floor.cframe:PointToObjectSpace(Vector3.new(
 			position.X,
 			floor.cframe.Position.Y,
 			position.Z
 		))
-		if math.abs(localPosition.X) <= floor.halfX + 0.25
-			and math.abs(localPosition.Z) <= floor.halfZ + 0.25
-			and math.abs(position.Y - floor.part.Position.Y) <= 15 then
+		local verticalPosition = floor.cframe:PointToObjectSpace(position).Y
+		if math.abs(planarPosition.X) <= floor.halfX + 0.25
+			and math.abs(planarPosition.Z) <= floor.halfZ + 0.25
+			and math.abs(verticalPosition)
+				<= floor.part.Size.Y * 0.5 + ARENA_VERTICAL_MARGIN then
 			return true
 		end
 	end
@@ -140,7 +148,7 @@ local function getActiveGeometry(arena: Instance): ArenaGeometry?
 	return nil
 end
 
-local function makeLineOfSightParameters(): RaycastParams
+local function makeLineOfSightParameters(geometry: ArenaGeometry): RaycastParams
 	local excluded: {Instance} = {}
 	local npcFolder = getNpcFolder()
 	if npcFolder then
@@ -150,6 +158,12 @@ local function makeLineOfSightParameters(): RaycastParams
 		if player.Character then
 			table.insert(excluded, player.Character)
 		end
+	end
+	local floorContainer = geometry.map:FindFirstChild(FLOOR_CONTAINER_NAME)
+	if floorContainer then
+		-- Floor unions can have coarse collision hulls that extend above their
+		-- visible surface. They define navigation, never line-of-sight cover.
+		table.insert(excluded, floorContainer)
 	end
 
 	local parameters = RaycastParams.new()
@@ -161,26 +175,31 @@ local function makeLineOfSightParameters(): RaycastParams
 	return parameters
 end
 
-local function makeWallLineOfSightParameters(geometry: ArenaGeometry): RaycastParams?
-	local wallParts: {Instance} = {}
-	local wallsContainer = geometry.map:FindFirstChild(WALLS_CONTAINER_NAME)
-	if wallsContainer then
-		if wallsContainer:IsA("BasePart") then
-			table.insert(wallParts, wallsContainer)
+local function makeCoverLineOfSightParameters(geometry: ArenaGeometry): RaycastParams?
+	local coverParts: {Instance} = {}
+	for _, containerName in ipairs({ WALLS_CONTAINER_NAME, RAMPS_CONTAINER_NAME }) do
+		local container = geometry.map:FindFirstChild(containerName)
+		if not container then
+			continue
 		end
-		for _, descendant in ipairs(wallsContainer:GetDescendants()) do
+		if container:IsA("BasePart") then
+			container.CanQuery = true
+			table.insert(coverParts, container)
+		end
+		for _, descendant in ipairs(container:GetDescendants()) do
 			if descendant:IsA("BasePart") then
-				table.insert(wallParts, descendant)
+				descendant.CanQuery = true
+				table.insert(coverParts, descendant)
 			end
 		end
 	end
-	if #wallParts == 0 then
+	if #coverParts == 0 then
 		return nil
 	end
 
 	local parameters = RaycastParams.new()
 	parameters.FilterType = Enum.RaycastFilterType.Include
-	parameters.FilterDescendantsInstances = wallParts
+	parameters.FilterDescendantsInstances = coverParts
 	parameters.IgnoreWater = true
 	parameters.RespectCanCollide = false
 	parameters.CollisionGroup = Config.RAYCAST_COLLISION_GROUP
@@ -191,8 +210,11 @@ local function actorsAreInCaptureArea(seeker: Actor, hider: Actor): boolean
 	local offset = hider.rootPart.Position - seeker.rootPart.Position
 	local horizontalDistance = Vector2.new(offset.X, offset.Z).Magnitude
 	local visibleRadius = SearchGeometry.GetRadius(seeker.rootPart.CFrame.LookVector, offset)
+	local captureRadius = if visibleRadius > Config.SEARCH_RADIUS
+		then math.max(Config.SEARCH_RADIUS, visibleRadius - FORWARD_CAPTURE_INSET_STUDS)
+		else visibleRadius
 	return math.abs(offset.Y) <= Config.MAX_VERTICAL_DIFFERENCE
-		and horizontalDistance <= visibleRadius
+		and horizontalDistance <= captureRadius
 end
 
 local function lineOfSightPosition(actor: Actor): Vector3
@@ -215,7 +237,7 @@ local function hasLineOfSight(
 	first: Actor,
 	second: Actor,
 	parameters: RaycastParams,
-	wallParameters: RaycastParams?
+	coverParameters: RaycastParams?
 ): boolean
 	local origin = lineOfSightPosition(first)
 	local direction = lineOfSightPosition(second) - origin
@@ -225,10 +247,10 @@ local function hasLineOfSight(
 	if Workspace:Raycast(origin, direction, parameters) then
 		return false
 	end
-	return not wallParameters or Workspace:Raycast(origin, direction, wallParameters) == nil
+	return not coverParameters or Workspace:Raycast(origin, direction, coverParameters) == nil
 end
 
-local function captureHider(hider: Actor)
+local function captureHider(hider: Actor, seeker: Actor)
 	if caughtOwners[hider.owner] then
 		return
 	end
@@ -238,9 +260,9 @@ local function captureHider(hider: Actor)
 		return
 	end
 	if hider.owner:IsA("Player") then
-		serviceCallbacks.CapturePlayer(hider.owner)
+		serviceCallbacks.CapturePlayer(hider.owner, seeker.owner)
 	elseif hider.owner:IsA("Model") then
-		serviceCallbacks.CaptureNpc(hider.owner)
+		serviceCallbacks.CaptureNpc(hider.owner, seeker.owner)
 	end
 end
 
@@ -248,24 +270,32 @@ local function detectCaptureAreas(
 	seekers: {Actor},
 	hiders: {Actor},
 	parameters: RaycastParams,
-	wallParameters: RaycastParams?
+	coverParameters: RaycastParams?
 )
 	for _, hider in ipairs(hiders) do
 		if caughtOwners[hider.owner] then
 			continue
 		end
+		local nearestSeeker: Actor? = nil
+		local nearestDistance = math.huge
 		for _, seeker in ipairs(seekers) do
-			-- Only the managed NPC Seeker can eliminate Hiders. Player Seeker roles
-			-- are not part of the normal round configuration.
+			-- Preserve the current rule that only the managed NPC Hunter captures.
+			-- Passing it through still makes the result event fully attributable.
 			if not seeker.owner:IsA("Model")
 				or seeker.owner:GetAttribute(MANAGED_NPC_ATTRIBUTE) ~= true then
 				continue
 			end
 			if actorsAreInCaptureArea(seeker, hider)
-				and hasLineOfSight(seeker, hider, parameters, wallParameters) then
-				captureHider(hider)
-				break
+				and hasLineOfSight(seeker, hider, parameters, coverParameters) then
+				local distance = (seeker.rootPart.Position - hider.rootPart.Position).Magnitude
+				if distance < nearestDistance then
+					nearestDistance = distance
+					nearestSeeker = seeker
+				end
 			end
+		end
+		if nearestSeeker then
+			captureHider(hider, nearestSeeker)
 		end
 	end
 end
@@ -288,8 +318,8 @@ local function scan()
 	detectCaptureAreas(
 		seekers,
 		hiders,
-		makeLineOfSightParameters(),
-		makeWallLineOfSightParameters(geometry)
+		makeLineOfSightParameters(geometry),
+		makeCoverLineOfSightParameters(geometry)
 	)
 end
 

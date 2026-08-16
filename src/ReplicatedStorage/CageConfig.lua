@@ -4,15 +4,24 @@ return table.freeze({
 	-- Models
 	WEAPON_MODEL_NAME = "CageModel",
 	TEMPLATE_MODEL_NAME = "cage",
+	CAGE_ON_SOUND_TEMPLATE_NAME = "CageOn",
+	CAGE_OFF_SOUND_TEMPLATE_NAME = "CageOff",
+	SOUND_FALLBACK_LIFETIME_SECONDS = 30,
 
-	-- Forward capture sector (keeps the previous 0-4 stud effective range)
+	-- Forward capture sector
 	AREA_MIN_DISTANCE = 0,
-	AREA_MAX_DISTANCE = 4,
+	AREA_MAX_DISTANCE = 6,
 	AREA_FOV_DEGREES = 110,
 	AREA_HEIGHT = 6,
-	CAPTURE_PLACEMENT_DISTANCE = 2,
+	-- Used only to prefer a target near the middle of the sector. The spawned
+	-- cage itself is placed at the selected target's current server position.
+	TARGET_PRIORITY_DISTANCE = 2,
 
-	-- Small server forgiveness for a highlighted target moving during network transit
+	-- Small server forgiveness for movement during network transit. The client
+	-- attack origin is projected onto actual server-observed movement and clamped.
+	SERVER_ATTACK_ORIGIN_MAX_OFFSET = 2.5,
+	SERVER_ATTACK_ORIGIN_MAX_LATERAL_OFFSET = 0.5,
+	SERVER_ATTACK_ORIGIN_MIN_SPEED = 1,
 	SERVER_DISTANCE_TOLERANCE = 0.75,
 	SERVER_ANGLE_TOLERANCE_DEGREES = 8,
 	SERVER_VERTICAL_TOLERANCE = 1,
@@ -50,5 +59,5 @@ return table.freeze({
 
 	-- Rescue prompt
 	RESCUE_RADIUS = 3,
-	RESCUE_HOLD_SECONDS = 4,
+	RESCUE_HOLD_SECONDS = 1,
 })

@@ -16,7 +16,9 @@ local PHASE_ROUND = "Round"
 local SEARCH_RAYCAST_COLLISION_GROUP = Config.RAYCAST_COLLISION_GROUP
 local VISUAL_FOLDER_NAME = "_LocalSeekerSearchVisuals"
 local MAP_CONTAINER_NAME = "Map"
+local FLOOR_CONTAINER_NAME = "Floor"
 local WALLS_CONTAINER_NAME = "Walls"
+local RAMPS_CONTAINER_NAME = "Ramps"
 
 type SearchVisual = {
 	model: Model,
@@ -184,7 +186,7 @@ local function collectRoleModels(role: string): {[Model]: BasePart}
 	return models
 end
 
-local function makeRaycastParameters(): RaycastParams
+local function getRaycastExclusions(): {Instance}
 	local excluded: {Instance} = { visualFolder }
 	local npcFolder = Workspace:FindFirstChild(NPC_FOLDER_NAME)
 	if npcFolder then
@@ -195,6 +197,22 @@ local function makeRaycastParameters(): RaycastParams
 			table.insert(excluded, player.Character)
 		end
 	end
+	return excluded
+end
+
+local function makeRaycastParameters(): RaycastParams
+	local excluded = getRaycastExclusions()
+	local activeArenaName = roundState:GetAttribute("ActiveArena")
+	local activeArena = if typeof(activeArenaName) == "string" and activeArenaName ~= ""
+		then Workspace:FindFirstChild(activeArenaName)
+		else nil
+	local map = if activeArena then activeArena:FindFirstChild(MAP_CONTAINER_NAME) else nil
+	local floorContainer = if map then map:FindFirstChild(FLOOR_CONTAINER_NAME) else nil
+	if floorContainer then
+		-- Match the server: a floor Union defines the walkable surface, but its
+		-- coarse collision hull must not shorten only the visible search field.
+		table.insert(excluded, floorContainer)
+	end
 	local parameters = RaycastParams.new()
 	parameters.FilterType = Enum.RaycastFilterType.Exclude
 	parameters.FilterDescendantsInstances = excluded
@@ -204,15 +222,25 @@ local function makeRaycastParameters(): RaycastParams
 	return parameters
 end
 
-local function isInsideMapWalls(instance: Instance): boolean
-	if instance.Name == WALLS_CONTAINER_NAME
+local function makeFloorRaycastParameters(): RaycastParams
+	local parameters = RaycastParams.new()
+	parameters.FilterType = Enum.RaycastFilterType.Exclude
+	parameters.FilterDescendantsInstances = getRaycastExclusions()
+	parameters.IgnoreWater = true
+	parameters.RespectCanCollide = true
+	parameters.CollisionGroup = SEARCH_RAYCAST_COLLISION_GROUP
+	return parameters
+end
+
+local function isInsideMapCover(instance: Instance): boolean
+	if (instance.Name == WALLS_CONTAINER_NAME or instance.Name == RAMPS_CONTAINER_NAME)
 		and instance.Parent
 		and instance.Parent.Name == MAP_CONTAINER_NAME then
 		return true
 	end
 	local current = instance.Parent
 	while current and current ~= Workspace do
-		if current.Name == WALLS_CONTAINER_NAME
+		if (current.Name == WALLS_CONTAINER_NAME or current.Name == RAMPS_CONTAINER_NAME)
 			and current.Parent
 			and current.Parent.Name == MAP_CONTAINER_NAME then
 			return true
@@ -225,7 +253,8 @@ end
 local function affectsWallCache(instance: Instance): boolean
 	return instance.Name == MAP_CONTAINER_NAME
 		or instance.Name == WALLS_CONTAINER_NAME
-		or isInsideMapWalls(instance)
+		or instance.Name == RAMPS_CONTAINER_NAME
+		or isInsideMapCover(instance)
 end
 
 Workspace.DescendantAdded:Connect(function(descendant)
@@ -247,7 +276,7 @@ local function getWallRaycastParameters(): RaycastParams?
 
 	local wallParts: {Instance} = {}
 	for _, descendant in ipairs(Workspace:GetDescendants()) do
-		if descendant:IsA("BasePart") and isInsideMapWalls(descendant) then
+		if descendant:IsA("BasePart") and isInsideMapCover(descendant) then
 			table.insert(wallParts, descendant)
 		end
 	end
@@ -267,20 +296,32 @@ local function getWallRaycastParameters(): RaycastParams?
 	return cachedWallParameters
 end
 
-local function getFloorY(rootPart: BasePart, parameters: RaycastParams): number
+local function getFloorY(
+	model: Model,
+	rootPart: BasePart,
+	parameters: RaycastParams
+): number
 	local result = Workspace:Raycast(rootPart.Position, Vector3.new(0, -30, 0), parameters)
-	return if result
-		then result.Position.Y + Config.VISUAL_FLOOR_OFFSET
-		else rootPart.Position.Y - rootPart.Size.Y * 0.5 + Config.VISUAL_FLOOR_OFFSET
+	if result then
+		return result.Position.Y + Config.VISUAL_FLOOR_OFFSET
+	end
+
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	local hipHeight = if humanoid then math.max(0, humanoid.HipHeight) else 0
+	return rootPart.Position.Y
+		- hipHeight
+		- rootPart.Size.Y * 0.5
+		+ Config.VISUAL_FLOOR_OFFSET
 end
 
 local function updateSearchVisual(
 	visual: SearchVisual,
 	rootPart: BasePart,
 	parameters: RaycastParams,
+	floorParameters: RaycastParams,
 	wallParameters: RaycastParams?
 )
-	local floorY = getFloorY(rootPart, parameters)
+	local floorY = getFloorY(visual.model, rootPart, floorParameters)
 	local origin = Vector3.new(
 		rootPart.Position.X,
 		floorY + Config.LINE_OF_SIGHT_HEIGHT,
@@ -368,10 +409,11 @@ local function updateVisuals()
 
 	local seekerModels = collectRoleModels(ROLE_SEEKER)
 	local parameters = makeRaycastParameters()
+	local floorParameters = makeFloorRaycastParameters()
 	local wallParameters = getWallRaycastParameters()
 	for model, rootPart in pairs(seekerModels) do
 		local visual = searchVisuals[model] or createSearchVisual(model)
-		updateSearchVisual(visual, rootPart, parameters, wallParameters)
+		updateSearchVisual(visual, rootPart, parameters, floorParameters, wallParameters)
 	end
 	for model in pairs(searchVisuals) do
 		if not seekerModels[model] then

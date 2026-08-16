@@ -30,7 +30,8 @@ local function normalizeStored(raw: any)
 		raw,
 		CurrencyConfig.DATA_VERSION,
 		CurrencyConfig.STARTING_CURRENCY,
-		CurrencyConfig.MAX_BALANCE
+		CurrencyConfig.MAX_BALANCE,
+		CurrencyConfig.MAX_STAT_VALUE
 	)
 end
 
@@ -67,6 +68,11 @@ function CurrencyDataStore.Load(userId: number)
 						lastError = tostring(refreshedRaw)
 					end
 				until stored.Closed or os.clock() >= handoffDeadline
+			end
+			if not stored.Closed
+				and stored.UpdatedAt > 0
+				and os.time() - stored.UpdatedAt < CurrencyConfig.SESSION_LOCK_STALE_SECONDS then
+				return nil, "PROFILE_ACTIVE"
 			end
 
 			return {
@@ -144,7 +150,9 @@ function CurrencyDataStore.Save(
 				or deniedReason == "NEWER_SESSION_SAVE"
 				or deniedReason == "CORRUPT_DATA"
 				or deniedReason == "UNSUPPORTED_VERSION"
-				or deniedReason == "INVALID_CURRENCY" then
+				or deniedReason == "INVALID_CURRENCY"
+				or deniedReason == "INVALID_WINS"
+				or deniedReason == "INVALID_PLAY_TIME" then
 				break
 			end
 		else

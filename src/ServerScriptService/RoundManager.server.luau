@@ -12,12 +12,17 @@ local roundModules = script.Parent:WaitForChild("Round")
 local RoundConfig = require(roundModules:WaitForChild("RoundConfig"))
 local DoorCharacterCollider = require(roundModules:WaitForChild("DoorCharacterCollider"))
 local SeekerSearchConfig = require(ReplicatedStorage:WaitForChild("SeekerSearchConfig"))
+local WeaponShopConfig = require(ReplicatedStorage:WaitForChild("WeaponShopConfig"))
 local HiderEvidenceService = require(roundModules:WaitForChild("HiderEvidenceService"))
 local HiderService = require(roundModules:WaitForChild("HiderService"))
 local CageService = require(roundModules:WaitForChild("CageService"))
 local RoundCharacterState = require(roundModules:WaitForChild("RoundCharacterState"))
 local RoundControl = require(roundModules:WaitForChild("RoundControl"))
+local RoundResultService = require(roundModules:WaitForChild("RoundResultService"))
 local SeekerCaptureService = require(roundModules:WaitForChild("SeekerCaptureService"))
+local CurrencyService = require(
+	script.Parent:WaitForChild("Currency"):WaitForChild("CurrencyService")
+)
 
 local STATE_NAME = "RoundState"
 local HIDER_TEAM_NAME = "Hiders"
@@ -28,10 +33,15 @@ local HUNTER_CHARACTER_NAME = "HunterCharacter"
 local HUB_CONTAINER_NAME = "HUB"
 local HUB_SPAWN_NAME = "SpawnHUB"
 local ARENA_SPAWN_NAME = "SpawnArena"
+local ARENA_TEMPLATES_CONTAINER_NAME = "Arenas"
+local BASE_ARENA_NAME = "BaseArena"
+local RUNTIME_ARENA_ATTRIBUTE = "RoundRuntimeArena"
 
 local STARTING_DURATION_SECONDS = RoundConfig.STARTING_DURATION_SECONDS
 local ROUND_DURATION_SECONDS = RoundConfig.ROUND_DURATION_SECONDS
+local ROUND_END_HIDER_COUNT = RoundConfig.ROUND_END_HIDER_COUNT
 local ARENA_READY_DURATION_SECONDS = RoundConfig.ARENA_READY_DURATION_SECONDS
+local ARENA_LOAD_REMAINING_SECONDS = RoundConfig.ARENA_LOAD_REMAINING_SECONDS
 local MINIMUM_PLAYERS = RoundConfig.MINIMUM_PLAYERS
 local MAX_HIDERS = RoundConfig.MAX_HIDERS
 local MAX_SEEKERS = RoundConfig.MAX_SEEKERS
@@ -43,6 +53,7 @@ local SEEKER_SCALE_MULTIPLIER = RoundConfig.SEEKER_SCALE_MULTIPLIER
 local NPC_SPAWN_SPACING = RoundConfig.NPC.SPAWN_SPACING
 local NPC_SPAWN_CLEARANCE = RoundConfig.NPC.SPAWN_CLEARANCE
 local MAX_ACTIVE_NPCS = RoundConfig.NPC.MAX_ACTIVE_NPCS
+local AUTOMATIC_HIDER_NPC_COUNTS = RoundConfig.NPC.AUTOMATIC_HIDER_COUNT_BY_PLAYER_COUNT
 local RECOMMENDED_ARENA_SPAWN_SIZE = 18
 
 local BASE_SCALE_ATTRIBUTE = "RoundBaseScale"
@@ -72,6 +83,12 @@ local caughtHiderCount = 0
 local activeArena: Instance? = nil
 local activeArenaSpawn: BasePart? = nil
 local previousArena: Instance? = nil
+local activeArenaIsRuntimeClone = false
+local baseArena: Instance? = Workspace:FindFirstChild(BASE_ARENA_NAME)
+if not baseArena then
+	baseArena = ServerStorage:FindFirstChild(BASE_ARENA_NAME)
+end
+local roundParticipants: {[Player]: string} = {}
 
 type AdminNpcPopulation = {
 	Hiders: number,
@@ -83,8 +100,9 @@ type AdminNpcPopulation = {
 local adminNpcPopulation: AdminNpcPopulation? = nil
 
 type ArenaCandidate = {
-	Arena: Instance,
+	Source: Instance,
 	Spawn: BasePart,
+	Stored: boolean,
 }
 
 local SPAWN_SLOT_COORDINATES = table.freeze({
@@ -101,6 +119,7 @@ local SPAWN_SLOT_COORDINATES = table.freeze({
 
 DoorCharacterCollider.Configure()
 HiderEvidenceService.Start()
+RoundResultService.Start()
 
 local function getOrCreateTeam(name: string, color: BrickColor): Team
 	local existing = Teams:FindFirstChild(name)
@@ -140,10 +159,12 @@ end
 
 roundState:SetAttribute("MaxHiders", MAX_HIDERS)
 roundState:SetAttribute("MaxSeekers", MAX_SEEKERS)
+roundState:SetAttribute("MinimumPlayers", MINIMUM_PLAYERS)
 roundState:SetAttribute("BotSeekerMode", BOT_SEEKER_MODE)
 roundState:SetAttribute("HiderCount", 0)
 roundState:SetAttribute("CaughtHiderCount", 0)
 roundState:SetAttribute("SeekerCount", 0)
+roundState:SetAttribute("NpcCount", 0)
 roundState:SetAttribute("Phase", PHASE_WAITING)
 roundState:SetAttribute("EndsAt", 0)
 roundState:SetAttribute("NpcAIEnabled", true)
@@ -289,11 +310,9 @@ local function getArenaForSpawn(instance: Instance): Instance?
 	return if instance.Parent == Workspace then instance else nil
 end
 
-local function getArenaCandidates(): {ArenaCandidate}
-	local candidates: {ArenaCandidate} = {}
-	local seenArenas: {[Instance]: boolean} = {}
+local function getSortedArenaSpawns(container: Instance): {BasePart}
 	local arenaSpawns: {BasePart} = {}
-	for _, descendant in ipairs(Workspace:GetDescendants()) do
+	for _, descendant in ipairs(container:GetDescendants()) do
 		if descendant.Name == ARENA_SPAWN_NAME and descendant:IsA("BasePart") then
 			table.insert(arenaSpawns, descendant)
 		end
@@ -301,6 +320,13 @@ local function getArenaCandidates(): {ArenaCandidate}
 	table.sort(arenaSpawns, function(left, right)
 		return left:GetFullName() < right:GetFullName()
 	end)
+	return arenaSpawns
+end
+
+local function getWorkspaceArenaCandidates(): {ArenaCandidate}
+	local candidates: {ArenaCandidate} = {}
+	local seenArenas: {[Instance]: boolean} = {}
+	local arenaSpawns = getSortedArenaSpawns(Workspace)
 
 	for _, arenaSpawn in ipairs(arenaSpawns) do
 		if arenaSpawn:IsA("SpawnLocation") then
@@ -309,15 +335,46 @@ local function getArenaCandidates(): {ArenaCandidate}
 			arenaSpawn.Enabled = false
 		end
 		local arena = getArenaForSpawn(arenaSpawn)
-		if arena and not seenArenas[arena] then
+		if arena
+			and arena.Name ~= BASE_ARENA_NAME
+			and arena:GetAttribute(RUNTIME_ARENA_ATTRIBUTE) ~= true
+			and not seenArenas[arena] then
 			seenArenas[arena] = true
 			table.insert(candidates, {
-				Arena = arena,
+				Source = arena,
 				Spawn = arenaSpawn,
+				Stored = false,
 			})
 		end
 	end
 	return candidates
+end
+
+local function getStoredArenaCandidates(container: Instance): {ArenaCandidate}
+	local candidates: {ArenaCandidate} = {}
+	for _, template in ipairs(container:GetChildren()) do
+		local arenaSpawns = getSortedArenaSpawns(template)
+		local arenaSpawn = arenaSpawns[1]
+		if arenaSpawn then
+			table.insert(candidates, {
+				Source = template,
+				Spawn = arenaSpawn,
+				Stored = true,
+			})
+		end
+	end
+	table.sort(candidates, function(left, right)
+		return left.Source:GetFullName() < right.Source:GetFullName()
+	end)
+	return candidates
+end
+
+local function getArenaCandidates(): {ArenaCandidate}
+	local storedArenas = ServerStorage:FindFirstChild(ARENA_TEMPLATES_CONTAINER_NAME)
+	if storedArenas then
+		return getStoredArenaCandidates(storedArenas)
+	end
+	return getWorkspaceArenaCandidates()
 end
 
 local function activeArenaIsAvailable(): boolean
@@ -330,12 +387,51 @@ local function activeArenaIsAvailable(): boolean
 		and arenaSpawn:IsDescendantOf(Workspace)
 end
 
+local function hideBaseArena()
+	local standbyArena = baseArena
+	if standbyArena and standbyArena:IsDescendantOf(Workspace) then
+		standbyArena.Parent = ServerStorage
+	end
+end
+
+local function showBaseArenaWhenNoActiveArena()
+	if activeArenaIsAvailable() then
+		return
+	end
+	SeekerCaptureService.SetArena(nil)
+	activeArena = nil
+	activeArenaSpawn = nil
+	activeArenaIsRuntimeClone = false
+	roundState:SetAttribute("ActiveArena", "")
+	roundState:SetAttribute("ActiveArenaSpawn", "")
+
+	local standbyArena = baseArena
+	if not standbyArena or not standbyArena.Parent then
+		standbyArena = Workspace:FindFirstChild(BASE_ARENA_NAME)
+			or ServerStorage:FindFirstChild(BASE_ARENA_NAME)
+		baseArena = standbyArena
+	end
+	if standbyArena and not standbyArena:IsDescendantOf(Workspace) then
+		standbyArena.Parent = Workspace
+	end
+end
+
 local function selectActiveArena(): boolean
 	local candidates = getArenaCandidates()
 	if #candidates == 0 then
 		if not missingArenaSpawnWarned then
 			missingArenaSpawnWarned = true
-			warn(`RoundManager: every arena needs one BasePart named {ARENA_SPAWN_NAME}; the round will wait`)
+			if ServerStorage:FindFirstChild(ARENA_TEMPLATES_CONTAINER_NAME) then
+				warn(
+					`RoundManager: ServerStorage.{ARENA_TEMPLATES_CONTAINER_NAME} needs at least one `
+						.. `arena template containing a BasePart named {ARENA_SPAWN_NAME}; the round will wait`
+				)
+			else
+				warn(
+					`RoundManager: every Workspace arena needs one BasePart named `
+						.. `{ARENA_SPAWN_NAME}; the round will wait`
+				)
+			end
 		end
 		return false
 	end
@@ -343,36 +439,64 @@ local function selectActiveArena(): boolean
 	missingArenaSpawnWarned = false
 	local selectable: {ArenaCandidate} = {}
 	for _, candidate in ipairs(candidates) do
-		if #candidates == 1 or candidate.Arena ~= previousArena then
+		if #candidates == 1 or candidate.Source ~= previousArena then
 			table.insert(selectable, candidate)
 		end
 	end
 	local chosen = selectable[random:NextInteger(1, #selectable)]
-	activeArena = chosen.Arena
-	activeArenaSpawn = chosen.Spawn
-	previousArena = chosen.Arena
-	SeekerCaptureService.SetArena(chosen.Arena)
+	local nextArena = chosen.Source
+	local nextArenaSpawn = chosen.Spawn
+	local nextArenaIsRuntimeClone = false
+	if chosen.Stored then
+		local succeeded, clonedArena = pcall(function()
+			return chosen.Source:Clone()
+		end)
+		if not succeeded or not clonedArena then
+			warn(`RoundManager: could not clone {chosen.Source:GetFullName()}: {tostring(clonedArena)}`)
+			return false
+		end
+		nextArena = clonedArena
+		nextArena:SetAttribute(RUNTIME_ARENA_ATTRIBUTE, true)
+		nextArena.Parent = Workspace
+		nextArenaSpawn = getSortedArenaSpawns(nextArena)[1]
+		if not nextArenaSpawn then
+			nextArena:Destroy()
+			warn(`RoundManager: cloned arena {chosen.Source:GetFullName()} lost its {ARENA_SPAWN_NAME}`)
+			return false
+		end
+		nextArenaIsRuntimeClone = true
+	end
+
+	if nextArenaSpawn:IsA("SpawnLocation") then
+		nextArenaSpawn.Enabled = false
+	end
+	local oldArena = activeArena
+	local destroyOldArena = activeArenaIsRuntimeClone
+	activeArena = nextArena
+	activeArenaSpawn = nextArenaSpawn
+	activeArenaIsRuntimeClone = nextArenaIsRuntimeClone
+	previousArena = chosen.Source
+	SeekerCaptureService.SetArena(nextArena)
+	hideBaseArena()
 	if not warnedSmallArenaSpawns[chosen.Spawn]
-		and (chosen.Spawn.Size.X < RECOMMENDED_ARENA_SPAWN_SIZE
-			or chosen.Spawn.Size.Z < RECOMMENDED_ARENA_SPAWN_SIZE) then
+		and (nextArenaSpawn.Size.X < RECOMMENDED_ARENA_SPAWN_SIZE
+			or nextArenaSpawn.Size.Z < RECOMMENDED_ARENA_SPAWN_SIZE) then
 		warnedSmallArenaSpawns[chosen.Spawn] = true
 		warn(
-			`RoundManager: {chosen.Spawn:GetFullName()} should be at least `
+			`RoundManager: {nextArenaSpawn:GetFullName()} should be at least `
 				.. `{RECOMMENDED_ARENA_SPAWN_SIZE} x {RECOMMENDED_ARENA_SPAWN_SIZE} studs `
 				.. "to keep all participant spawn slots separate"
 		)
 	end
-	roundState:SetAttribute("ActiveArena", chosen.Arena.Name)
-	roundState:SetAttribute("ActiveArenaSpawn", chosen.Spawn:GetFullName())
+	roundState:SetAttribute("ActiveArena", nextArena.Name)
+	roundState:SetAttribute("ActiveArenaSpawn", nextArenaSpawn:GetFullName())
+	if chosen.Stored then
+		print(`RoundManager: loaded {chosen.Source:GetFullName()} into Workspace as the active arena`)
+	end
+	if destroyOldArena and oldArena and oldArena ~= nextArena and oldArena.Parent then
+		oldArena:Destroy()
+	end
 	return true
-end
-
-local function clearActiveArena()
-	SeekerCaptureService.SetArena(nil)
-	activeArena = nil
-	activeArenaSpawn = nil
-	roundState:SetAttribute("ActiveArena", "")
-	roundState:SetAttribute("ActiveArenaSpawn", "")
 end
 
 local function getSpawnRaycastParameters(): RaycastParams
@@ -601,7 +725,15 @@ local function relocatePlayerForCurrentState(player: Player)
 			player
 		)
 		player:SetAttribute(ROUND_SPAWN_SLOT_ATTRIBUTE, slot)
-		placeCharacterAtSpawn(character, arenaSpawn, slot)
+		if placeCharacterAtSpawn(character, arenaSpawn, slot) then
+			local revision = player:GetAttribute(
+				WeaponShopConfig.ROUND_ARENA_TELEPORT_REVISION_ATTRIBUTE
+			)
+			player:SetAttribute(
+				WeaponShopConfig.ROUND_ARENA_TELEPORT_REVISION_ATTRIBUTE,
+				if type(revision) == "number" then revision + 1 else 1
+			)
+		end
 		return
 	end
 
@@ -649,13 +781,15 @@ local function resetRoles(preserveCaughtResults: boolean?)
 	for _, player in ipairs(Players:GetPlayers()) do
 		setSpectator(player)
 	end
-	clearActiveArena()
+	-- Keep the completed round's runtime arena in Workspace. It is replaced
+	-- atomically when the next Starting countdown reaches the preload mark.
 	if preserveCaughtResults ~= true then
 		caughtHiderCount = 0
 	end
 	roundState:SetAttribute("HiderCount", 0)
 	roundState:SetAttribute("CaughtHiderCount", caughtHiderCount)
 	roundState:SetAttribute("SeekerCount", 0)
+	roundState:SetAttribute("NpcCount", 0)
 end
 
 local function getRoleCounts(): (number, number)
@@ -722,28 +856,11 @@ local function getNpcRoleCounts(): (number, number)
 	return hiders, seekers
 end
 
-local function chooseNpcRole(): string?
-	local hiderCount, seekerCount = getRoleCounts()
-	local usedHiderSlots = hiderCount + caughtHiderCount
-	if usedHiderSlots >= MAX_HIDERS and seekerCount >= MAX_SEEKERS then
-		return nil
-	end
-	if hiderCount == 0 and usedHiderSlots < MAX_HIDERS then
-		return ROLE_HIDER
-	end
-	if seekerCount == 0 and seekerCount < MAX_SEEKERS then
-		return ROLE_SEEKER
-	end
-
-	local hiderFill = usedHiderSlots / MAX_HIDERS
-	local seekerFill = seekerCount / MAX_SEEKERS
-	if usedHiderSlots < MAX_HIDERS and (seekerCount >= MAX_SEEKERS or hiderFill <= seekerFill) then
-		return ROLE_HIDER
-	end
-	if seekerCount < MAX_SEEKERS then
-		return ROLE_SEEKER
-	end
-	return nil
+local function getAutomaticHiderNpcTarget(): number
+	local configuredTarget = AUTOMATIC_HIDER_NPC_COUNTS[#Players:GetPlayers()]
+	return if type(configuredTarget) == "number"
+		then math.clamp(math.floor(configuredTarget), 0, MAX_ACTIVE_NPCS)
+		else 0
 end
 
 local function updateRoleCounts()
@@ -751,6 +868,7 @@ local function updateRoleCounts()
 	roundState:SetAttribute("HiderCount", hiderCount)
 	roundState:SetAttribute("CaughtHiderCount", caughtHiderCount)
 	roundState:SetAttribute("SeekerCount", seekerCount)
+	roundState:SetAttribute("NpcCount", getManagedNpcCount())
 end
 
 local function recordCaughtHider()
@@ -1122,23 +1240,50 @@ local function fillNpcSlots(): (number, boolean)
 		return added, completed
 	end
 
-	local before = getManagedNpcCount()
+	local hiderTarget = getAutomaticHiderNpcTarget()
+	local playerHiders, playerSeekers = getPlayerRoleCounts()
+	local seekerTarget = if BOT_SEEKER_MODE
+		then MAX_SEEKERS
+		elseif playerSeekers == 0 then MAX_SEEKERS
+		else 0
+	local availableHiderSlots = math.max(0, MAX_HIDERS - caughtHiderCount - playerHiders)
+	hiderTarget = math.min(hiderTarget, availableHiderSlots)
+	local currentHiders, currentSeekers = getNpcRoleCounts()
+	if currentHiders > hiderTarget then
+		removeManagedNpcs(ROLE_HIDER, currentHiders - hiderTarget)
+	end
+	if currentSeekers > seekerTarget then
+		removeManagedNpcs(ROLE_SEEKER, currentSeekers - seekerTarget)
+	end
+
+	currentHiders, currentSeekers = getNpcRoleCounts()
+	local added = 0
 	local spawnFailed = false
-	while getManagedNpcCount() < MAX_ACTIVE_NPCS do
-		local role = chooseNpcRole()
-		if not role then
-			break
-		end
-		if not spawnNpc(role) then
+	for _ = currentSeekers + 1, seekerTarget do
+		if not spawnNpc(ROLE_SEEKER) then
 			spawnFailed = true
 			break
 		end
+		added += 1
+	end
+	if not spawnFailed then
+		for _ = currentHiders + 1, hiderTarget do
+			if not spawnNpc(ROLE_HIDER) then
+				spawnFailed = true
+				break
+			end
+			added += 1
+		end
 	end
 	updateRoleCounts()
-	return getManagedNpcCount() - before, not spawnFailed
+	local finalHiders, finalSeekers = getNpcRoleCounts()
+	return added, not spawnFailed
+		and finalHiders == hiderTarget
+		and finalSeekers == seekerTarget
 end
 
 local function assignRoles(): boolean
+	table.clear(roundParticipants)
 	local players = Players:GetPlayers()
 	shufflePlayers(players)
 
@@ -1150,6 +1295,7 @@ local function assignRoles(): boolean
 		local participantCount = math.min(#players, MAX_HIDERS)
 		for index = 1, participantCount do
 			setPlayerRole(players[index], ROLE_HIDER, index)
+			roundParticipants[players[index]] = ROLE_HIDER
 		end
 	else
 		-- Decide independently whether this round's Seeker is human or an NPC.
@@ -1160,11 +1306,13 @@ local function assignRoles(): boolean
 			else 0
 		local participantCount = math.min(#players, MAX_HIDERS + playerSeekerCount)
 		for index = 1, participantCount do
+			local role = if index <= playerSeekerCount then ROLE_SEEKER else ROLE_HIDER
 			setPlayerRole(
 				players[index],
-				if index <= playerSeekerCount then ROLE_SEEKER else ROLE_HIDER,
+				role,
 				index
 			)
+			roundParticipants[players[index]] = role
 		end
 	end
 	local _, populationCompleted = fillNpcSlots()
@@ -1196,8 +1344,10 @@ local function runTimedPhase(phase: string, durationSeconds: number, requirePlay
 			warn("RoundManager: the active SpawnArena was removed; returning everyone to the hub")
 			return false
 		end
+		local hiderCount = roundState:GetAttribute("HiderCount")
 		if phase == PHASE_ROUND
-			and roundState:GetAttribute("HiderCount") == 0
+			and type(hiderCount) == "number"
+			and hiderCount <= ROUND_END_HIDER_COUNT
 			and pendingHiderReplacements == 0 then
 			return true
 		end
@@ -1216,6 +1366,7 @@ end
 local function runStartingPhase(): boolean
 	setPhase(PHASE_STARTING, STARTING_DURATION_SECONDS)
 	startingParticipantsAssigned = false
+	local arenaPrepared = false
 	local participantsAssigned = false
 
 	repeat
@@ -1223,16 +1374,21 @@ local function runStartingPhase(): boolean
 		if #Players:GetPlayers() < MINIMUM_PLAYERS then
 			return false
 		end
-		if not activeArenaIsAvailable() then
-			warn("RoundManager: the active SpawnArena was removed; returning everyone to the hub")
-			return false
-		end
 		if restartRoundRequested or endRoundRequested then
 			return true
 		end
 
 		local remainingSeconds = phaseEndsAt - workspace:GetServerTimeNow()
+		if not arenaPrepared
+			and (remainingSeconds <= ARENA_LOAD_REMAINING_SECONDS or skipCountdownRequested) then
+			arenaPrepared = selectActiveArena()
+		end
+		if arenaPrepared and not activeArenaIsAvailable() then
+			warn("RoundManager: the active SpawnArena was removed; returning everyone to the hub")
+			return false
+		end
 		if not participantsAssigned
+			and arenaPrepared
 			and (remainingSeconds <= ARENA_READY_DURATION_SECONDS or skipCountdownRequested) then
 			-- Keep everyone in HUB for the first part of the same visible countdown.
 			-- Assigning roles relocates players and spawns NPCs on the arena.
@@ -1247,13 +1403,19 @@ local function runStartingPhase(): boolean
 			startingParticipantsAssigned = true
 		end
 
-		if skipCountdownRequested then
+		if skipCountdownRequested and arenaPrepared and participantsAssigned then
 			return true
 		end
 		task.wait(0.25)
 	until workspace:GetServerTimeNow() >= phaseEndsAt
 
 	-- This only matters if an administrator shortened the phase between ticks.
+	if not arenaPrepared then
+		arenaPrepared = selectActiveArena()
+		if not arenaPrepared then
+			return false
+		end
+	end
 	if not participantsAssigned then
 		preparingRoundParticipants = true
 		local assigned = assignRoles()
@@ -1283,6 +1445,7 @@ local function replaceNpcWithPlayer(player: Player): boolean
 			return false
 		end
 		setPlayerRole(player, ROLE_HIDER)
+		roundParticipants[player] = ROLE_HIDER
 		updateRoleCounts()
 		return true
 	end
@@ -1293,14 +1456,16 @@ local function replaceNpcWithPlayer(player: Player): boolean
 			and child:GetAttribute(MANAGED_NPC_ATTRIBUTE) == true
 			and (role == ROLE_HIDER or (not BOT_SEEKER_MODE and role == ROLE_SEEKER)) then
 			local npcSpawnSlot = child:GetAttribute(ROUND_SPAWN_SLOT_ATTRIBUTE)
-			HiderService.Stop(child)
-			RoundCharacterState.Clear(child)
-			child:Destroy()
+			if not safelyDestroyManagedNpc(child) then
+				return false
+			end
 			setPlayerRole(
 				player,
 				role,
 				if isValidSpawnSlot(npcSpawnSlot) then npcSpawnSlot else nil
 			)
+			roundParticipants[player] = role
+			fillNpcSlots()
 			updateRoleCounts()
 			return true
 		end
@@ -1351,6 +1516,7 @@ end
 Players.PlayerAdded:Connect(setupPlayer)
 
 Players.PlayerRemoving:Connect(function(player)
+	roundParticipants[player] = nil
 	local departingRole = player:GetAttribute("RoundRole")
 	local departurePhase = roundState:GetAttribute("Phase")
 	local shouldReplace = (departingRole == ROLE_HIDER or departingRole == ROLE_SEEKER)
@@ -1368,7 +1534,7 @@ Players.PlayerRemoving:Connect(function(player)
 		if shouldReplace
 			and not adminNpcPopulation
 			and (phase == PHASE_PREPARING or phase == PHASE_STARTING or phase == PHASE_ROUND) then
-			spawnNpc(departingRole)
+			fillNpcSlots()
 		end
 		if shouldReplace and departingRole == ROLE_HIDER then
 			pendingHiderReplacements = math.max(0, pendingHiderReplacements - 1)
@@ -1381,12 +1547,14 @@ for _, player in ipairs(Players:GetPlayers()) do
 	setupPlayer(player)
 end
 
-local function captureNpcAsCaught(npc: Model)
-	if npc.Parent ~= npcFolder
+local function captureNpcAsCaught(npc: Model, captor: Instance)
+	if roundState:GetAttribute("Phase") ~= PHASE_ROUND
+		or npc.Parent ~= npcFolder
 		or npc:GetAttribute(MANAGED_NPC_ATTRIBUTE) ~= true
 		or npc:GetAttribute("RoundRole") ~= ROLE_HIDER then
 		return
 	end
+	RoundResultService.RecordCapture(captor, npc)
 	SeekerCaptureService.ClearOwner(npc)
 	CageService.Remove(npc)
 	HiderEvidenceService.Clear(npc)
@@ -1400,10 +1568,12 @@ local function captureNpcAsCaught(npc: Model)
 end
 
 SeekerCaptureService.Start({
-	CapturePlayer = function(player: Player)
+	CapturePlayer = function(player: Player, captor: Instance)
 		if roundState:GetAttribute("Phase") == PHASE_ROUND
 			and player.Parent == Players
 			and player:GetAttribute("RoundRole") == ROLE_HIDER then
+			RoundResultService.RecordCapture(captor, player)
+			RoundResultService.MarkEliminated(player)
 			recordCaughtHider()
 			setSpectator(player, true)
 			updateRoleCounts()
@@ -1467,6 +1637,16 @@ RoundControl.Register(function(action: string, arguments: {[string]: any}): (boo
 		if currentRole == role then
 			return true, `{target.Name} is already a {role}.`, nil
 		end
+		local markEliminated = false
+		if phase == PHASE_ROUND and roundParticipants[target] ~= nil then
+			if role == ROLE_SPECTATOR then
+				markEliminated = true
+			else
+				return false, "Participant roles cannot be changed during an active round.", nil
+			end
+		elseif phase == PHASE_ROUND and role ~= ROLE_SPECTATOR then
+			return false, "Spectators cannot join an active round through SetRole.", nil
+		end
 		if currentRole ~= role and role ~= ROLE_SPECTATOR then
 			if adminNpcPopulation then
 				local playerHiders, playerSeekers = getPlayerRoleCounts()
@@ -1486,6 +1666,9 @@ RoundControl.Register(function(action: string, arguments: {[string]: any}): (boo
 		end
 		if role == ROLE_SPECTATOR then
 			setSpectator(target)
+			if markEliminated then
+				RoundResultService.MarkEliminated(target)
+			end
 		else
 			if target:GetAttribute(ROUND_CAUGHT_ATTRIBUTE) == true then
 				caughtHiderCount = math.max(0, caughtHiderCount - 1)
@@ -1739,17 +1922,69 @@ RoundControl.Register(function(action: string, arguments: {[string]: any}): (boo
 	return false, "Unknown round-control action.", nil
 end)
 
+local function recordRoundWin(player: Player, winningRole: string)
+	local reason = `RoundVictory:{winningRole}`
+	local recorded, _, recordError = CurrencyService.RecordWin(player, reason)
+	if recorded then
+		return
+	end
+	if recordError ~= "NOT_LOADED" then
+		warn(
+			`RoundManager: could not record a win for {player.Name} ({player.UserId}): `
+				.. tostring(recordError)
+		)
+		return
+	end
+
+	-- A round can finish while a slow DataStore load is still completing. Keep
+	-- the result tied to this Player, but do not write it after they leave.
+	task.spawn(function()
+		if not CurrencyService.AwaitLoaded(player, 15) or player.Parent ~= Players then
+			warn(
+				`RoundManager: profile was not ready to record a win for {player.Name} `
+					.. `({player.UserId})`
+			)
+			return
+		end
+		local retryRecorded, _, retryError = CurrencyService.RecordWin(player, reason)
+		if not retryRecorded then
+			warn(
+				`RoundManager: could not record a delayed win for {player.Name} `
+					.. `({player.UserId}): {tostring(retryError)}`
+			)
+		end
+	end)
+end
+
+local function awardNaturalRoundWinners()
+	local hiderCount = roundState:GetAttribute("HiderCount")
+	local winningRole = if type(hiderCount) == "number" and hiderCount <= 0
+		then ROLE_SEEKER
+		else ROLE_HIDER
+	for player, participantRole in pairs(roundParticipants) do
+		if player.Parent == Players
+			and participantRole == winningRole
+			and player:GetAttribute("RoundRole") == winningRole then
+			recordRoundWin(player, winningRole)
+		end
+	end
+end
+
 while true do
 	restartRoundRequested = false
 	endRoundRequested = false
+	table.clear(roundParticipants)
+	RoundResultService.CancelRound()
 	resetRoles()
 	setPhase(PHASE_WAITING, 0)
+	showBaseArenaWhenNoActiveArena()
 	while #Players:GetPlayers() < MINIMUM_PLAYERS do
+		showBaseArenaWhenNoActiveArena()
 		task.wait(0.5)
 	end
 
 	while #Players:GetPlayers() >= MINIMUM_PLAYERS do
-		if getHubSpawn() and selectActiveArena() then
+		if getHubSpawn() and #getArenaCandidates() > 0 then
 			break
 		end
 		task.wait(1)
@@ -1766,16 +2001,32 @@ while true do
 	end
 	skipCountdownRequested = false
 
+	local naturalRoundCompleted = false
+	local roundResultsStarted = false
 	if not endRoundRequested then
+		RoundResultService.BeginRound(roundParticipants)
+		roundResultsStarted = true
 		if not runTimedPhase(PHASE_ROUND, ROUND_DURATION_SECONDS, true) then
+			RoundResultService.CancelRound()
 			continue
 		end
 		if restartRoundRequested then
+			RoundResultService.CancelRound()
 			continue
 		end
+		naturalRoundCompleted = not endRoundRequested
+	end
+	if naturalRoundCompleted then
+		awardNaturalRoundWinners()
+	end
+	if roundResultsStarted then
+		setPhase(PHASE_ENDED, 0)
+		RoundResultService.FinishRound()
 	end
 
 	endRoundRequested = false
-	setPhase(PHASE_ENDED, 0)
+	if not roundResultsStarted then
+		setPhase(PHASE_ENDED, 0)
+	end
 	resetRoles(true)
 end

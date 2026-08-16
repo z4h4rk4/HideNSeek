@@ -12,11 +12,15 @@ local npcColors = table.freeze({
 })
 
 return table.freeze({
-	STARTING_DURATION_SECONDS = 15,
-	ROUND_DURATION_SECONDS = 90,
+	STARTING_DURATION_SECONDS = 20,
+	ROUND_DURATION_SECONDS = 60,
+	ROUND_END_HIDER_COUNT = 1,
 	-- The Starting countdown begins in HUB. Participants are moved to the
 	-- arena only for its final ARENA_READY_DURATION_SECONDS.
 	ARENA_READY_DURATION_SECONDS = 5,
+	-- Clone the next ServerStorage/Arenas template at this point in the
+	-- Starting countdown. The previous runtime arena stays loaded until then.
+	ARENA_LOAD_REMAINING_SECONDS = 10,
 	MINIMUM_PLAYERS = 1,
 	MAX_HIDERS = 6,
 	MAX_SEEKERS = 1,
@@ -33,7 +37,6 @@ return table.freeze({
 		MIN_DIAMETER = 1.4,
 		MIN_HEIGHT = 1.6,
 	}),
-
 	ROLE_HIDER = "Hider",
 	ROLE_SEEKER = "Seeker",
 	ROLE_SPECTATOR = "Spectator",
@@ -47,6 +50,10 @@ return table.freeze({
 		SPAWN_SPACING = 4,
 		SPAWN_CLEARANCE = 0.1,
 		MAX_ACTIVE_NPCS = 6,
+		AUTOMATIC_HIDER_COUNT_BY_PLAYER_COUNT = table.freeze({
+			[1] = 5,
+			[2] = 3,
+		}),
 		COLORS = npcColors,
 	}),
 })

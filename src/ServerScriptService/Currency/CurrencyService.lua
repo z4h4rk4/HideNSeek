@@ -11,12 +11,19 @@ local CurrencyService = {}
 local profiles: {[number]: any} = {}
 local loading: {[number]: Player} = {}
 local changedEvent = Instance.new("BindableEvent")
+local ownershipChangedEvent = Instance.new("BindableEvent")
+local statsChangedEvent = Instance.new("BindableEvent")
+local profileSavedEvent = Instance.new("BindableEvent")
 local started = false
 local shuttingDown = false
+local profileSnapshotPublisher: any = nil
 local playerAddedConnection: RBXScriptConnection? = nil
 local playerRemovingConnection: RBXScriptConnection? = nil
 
 CurrencyService.Changed = changedEvent.Event
+CurrencyService.OwnershipChanged = ownershipChangedEvent.Event
+CurrencyService.StatsChanged = statsChangedEvent.Event
+CurrencyService.ProfileSaved = profileSavedEvent.Event
 
 local scheduleDirtySave: any
 local closeProfile: any
@@ -31,10 +38,19 @@ local function validReason(reason: any): boolean
 	return type(reason) == "string" and #reason >= 1 and #reason <= 128
 end
 
+local function validWeaponName(weaponName: any): boolean
+	return type(weaponName) == "string"
+		and #weaponName >= 1
+		and #weaponName <= 64
+		and string.match(weaponName, "^[%w_%-]+$") ~= nil
+end
+
 local function isPermanentDataError(reason: any): boolean
 	return reason == "CORRUPT_DATA"
 		or reason == "UNSUPPORTED_VERSION"
 		or reason == "INVALID_CURRENCY"
+		or reason == "INVALID_WINS"
+		or reason == "INVALID_PLAY_TIME"
 end
 
 local function getUsableProfile(player: Player)
@@ -97,6 +113,7 @@ local function saveProfile(profile, releaseSession: boolean, allowClosing: boole
 	if ok then
 		profile.lastSavedRevision = math.max(profile.lastSavedRevision, capturedRevision)
 		profile.lastSuccessfulSaveUnix = savedAt or os.time()
+		profileSavedEvent:Fire(profile.player, capturedData, releaseSession)
 		if releaseSession then
 			profile.sessionValid = false
 		end
@@ -160,6 +177,44 @@ scheduleDirtySave = function(profile)
 			scheduleDirtySave(profile)
 		end
 	end)
+end
+
+local function accruePlayTime(profile, shouldScheduleSave: boolean): number
+	if profile.closing or profile.closed or not profile.sessionValid then
+		return 0
+	end
+	local now = os.clock()
+	local checkpoint = profile.playTimeCheckpoint
+	if type(checkpoint) ~= "number" then
+		profile.playTimeCheckpoint = now
+		return 0
+	end
+
+	local wholeSeconds = math.floor(now - checkpoint)
+	if wholeSeconds <= 0 then
+		return 0
+	end
+	profile.playTimeCheckpoint = checkpoint + wholeSeconds
+
+	local available = CurrencyConfig.MAX_STAT_VALUE - profile.data.PlayTimeSeconds
+	local addedSeconds = math.min(wholeSeconds, available)
+	if addedSeconds <= 0 then
+		return 0
+	end
+
+	profile.data.PlayTimeSeconds += addedSeconds
+	profile.revision += 1
+	statsChangedEvent:Fire(
+		profile.player,
+		"PlayTimeSeconds",
+		profile.data.PlayTimeSeconds,
+		addedSeconds,
+		"ConnectedPlayTime"
+	)
+	if shouldScheduleSave then
+		scheduleDirtySave(profile)
+	end
+	return addedSeconds
 end
 
 local function attachLeaderstats(profile)
@@ -236,10 +291,34 @@ closeProfile = function(profile)
 		return profile.closeSucceeded
 	end
 
+	accruePlayTime(profile, false)
 	profile.closing = true
 	profile.player:SetAttribute(CurrencyConfig.ATTR_LOADED, false)
 	disconnect(profile.valueConnection)
 	profile.valueConnection = nil
+
+	-- Persist the final values while this server still owns the session, then
+	-- publish the same snapshot to the ordered leaderboards. Only after both
+	-- steps do we release the profile for another server.
+	local staged = true
+	local stagedReason: any = nil
+	if profileSnapshotPublisher then
+		staged, stagedReason = saveProfile(profile, false, true)
+	end
+	if staged and profileSnapshotPublisher then
+		local snapshot = CurrencyCore.CloneData(profile.data)
+		local publishCallOk, published, publishReason = pcall(
+			profileSnapshotPublisher,
+			profile.userId,
+			snapshot
+		)
+		if not publishCallOk or published == false then
+			warn(
+				(`[Currency] Final leaderboard publish failed for {profile.player.Name} `
+					.. `({profile.userId}): {tostring(if publishCallOk then publishReason else published)}`)
+			)
+		end
+	end
 
 	local ok, reason = saveProfile(profile, true, true)
 	profile.closeSucceeded = ok
@@ -251,6 +330,11 @@ closeProfile = function(profile)
 	if not ok then
 		warn(
 			(`[Currency] Final save failed for {profile.player.Name} ({profile.userId}): {tostring(reason)}`)
+		)
+	elseif not staged then
+		warn(
+			(`[Currency] Pre-release save failed for {profile.player.Name} `
+				.. `({profile.userId}): {tostring(stagedReason)}`)
 		)
 	end
 	return ok
@@ -310,6 +394,7 @@ local function loadPlayer(player: Player)
 		retryScheduled = false,
 		currencyValue = nil,
 		valueConnection = nil,
+		playTimeCheckpoint = nil,
 	}
 
 	-- Do not expose mutable player data until this server owns the session.
@@ -348,6 +433,7 @@ local function loadPlayer(player: Player)
 		return
 	end
 
+	profile.playTimeCheckpoint = os.clock()
 	profiles[player.UserId] = profile
 	if loading[player.UserId] == player then
 		loading[player.UserId] = nil
@@ -423,6 +509,7 @@ function CurrencyService.Start()
 			end
 			for _, profile in pairs(profiles) do
 				task.spawn(function()
+					accruePlayTime(profile, false)
 					local ok, reason = saveProfile(profile, false, false)
 					if not ok and reason ~= "PROFILE_CLOSING" and reason ~= "PROFILE_CLOSED" then
 						warn(
@@ -439,6 +526,14 @@ function CurrencyService.Start()
 		CurrencyService.Shutdown()
 	end)
 	print("[Currency] Service started")
+end
+
+function CurrencyService.SetProfileSnapshotPublisher(publisher: any)
+	if publisher ~= nil and type(publisher) ~= "function" then
+		return false, "INVALID_PUBLISHER"
+	end
+	profileSnapshotPublisher = publisher
+	return true, nil
 end
 
 function CurrencyService.IsLoaded(player: Player): boolean
@@ -469,6 +564,67 @@ function CurrencyService.GetCurrency(player: Player): number?
 	return profile and profile.data.Currency or nil
 end
 
+function CurrencyService.GetWins(player: Player): number?
+	local profile = getUsableProfile(player)
+	return profile and profile.data.Wins or nil
+end
+
+function CurrencyService.GetPlayTimeSeconds(player: Player): number?
+	local profile = getUsableProfile(player)
+	if not profile then
+		return nil
+	end
+	local checkpoint = profile.playTimeCheckpoint
+	local liveSeconds = if type(checkpoint) == "number"
+		then math.max(0, math.floor(os.clock() - checkpoint))
+		else 0
+	return math.min(
+		CurrencyConfig.MAX_STAT_VALUE,
+		profile.data.PlayTimeSeconds + liveSeconds
+	)
+end
+
+function CurrencyService.GetStatsSnapshot(player: Player): {[string]: number}?
+	local profile = getUsableProfile(player)
+	if not profile then
+		return nil
+	end
+	local playTimeSeconds = CurrencyService.GetPlayTimeSeconds(player)
+	return {
+		Currency = profile.data.Currency,
+		Wins = profile.data.Wins,
+		PlayTimeSeconds = playTimeSeconds or profile.data.PlayTimeSeconds,
+	}
+end
+
+function CurrencyService.RecordWin(player: Player, reason: string)
+	if not validReason(reason) then
+		return false, nil, "INVALID_REASON"
+	end
+	local profile, profileError = getUsableProfile(player)
+	if not profile then
+		return false, nil, profileError
+	end
+	if profile.data.Wins >= CurrencyConfig.MAX_STAT_VALUE then
+		return false, profile.data.Wins, "STAT_LIMIT"
+	end
+
+	profile.data.Wins += 1
+	profile.revision += 1
+	statsChangedEvent:Fire(player, "Wins", profile.data.Wins, 1, reason)
+	scheduleDirtySave(profile)
+	return true, profile.data.Wins, nil
+end
+
+function CurrencyService.CommitPlayTime(player: Player): number?
+	local profile = getUsableProfile(player)
+	if not profile then
+		return nil
+	end
+	accruePlayTime(profile, true)
+	return profile.data.PlayTimeSeconds
+end
+
 function CurrencyService.CanAfford(player: Player, amount: number): boolean
 	local profile = getUsableProfile(player)
 	return profile ~= nil
@@ -478,6 +634,121 @@ function CurrencyService.CanAfford(player: Player, amount: number): boolean
 		and amount >= 0
 		and amount <= CurrencyConfig.MAX_TRANSACTION
 		and profile.data.Currency >= amount
+end
+
+function CurrencyService.HasWeapon(player: Player, weaponName: string): boolean
+	if not validWeaponName(weaponName) then
+		return false
+	end
+	local profile = getUsableProfile(player)
+	return profile ~= nil and profile.data.OwnedWeapons[weaponName] == true
+end
+
+function CurrencyService.GetOwnedWeapons(player: Player): {[string]: boolean}?
+	local profile = getUsableProfile(player)
+	if not profile then
+		return nil
+	end
+	local copy: {[string]: boolean} = {}
+	for weaponName, owned in pairs(profile.data.OwnedWeapons) do
+		if owned == true then
+			copy[weaponName] = true
+		end
+	end
+	return copy
+end
+
+function CurrencyService.PurchaseWeapon(
+	player: Player,
+	weaponName: string,
+	price: number,
+	reason: string
+)
+	if not validWeaponName(weaponName) or not validReason(reason) then
+		return false, nil, "INVALID_PURCHASE"
+	end
+	if type(price) ~= "number"
+		or price ~= price
+		or price % 1 ~= 0
+		or price <= 0
+		or price > CurrencyConfig.MAX_TRANSACTION then
+		return false, nil, "INVALID_PRICE"
+	end
+
+	local profile, profileError = getUsableProfile(player)
+	if not profile then
+		return false, nil, profileError
+	end
+	if profile.data.OwnedWeapons[weaponName] == true then
+		return true, profile.data.Currency, "ALREADY_OWNED"
+	end
+
+	local nextBalance, amountError = CurrencyCore.ApplyDelta(
+		profile.data.Currency,
+		-price,
+		CurrencyConfig.MAX_BALANCE,
+		CurrencyConfig.MAX_TRANSACTION
+	)
+	if not nextBalance then
+		return false, profile.data.Currency, amountError
+	end
+
+	profile.data.Currency = nextBalance
+	profile.data.OwnedWeapons[weaponName] = true
+	profile.revision += 1
+	setDisplayedCurrency(profile)
+	changedEvent:Fire(player, nextBalance, -price, reason)
+	ownershipChangedEvent:Fire(player, weaponName, true, reason)
+	scheduleDirtySave(profile)
+	return true, nextBalance, nil
+end
+
+function CurrencyService.GrantWeapon(player: Player, weaponName: string, reason: string)
+	if not validWeaponName(weaponName) or not validReason(reason) then
+		return false, "INVALID_GRANT"
+	end
+	local profile, profileError = getUsableProfile(player)
+	if not profile then
+		return false, profileError
+	end
+	if profile.data.OwnedWeapons[weaponName] == true then
+		return true, "ALREADY_OWNED"
+	end
+
+	profile.data.OwnedWeapons[weaponName] = true
+	profile.revision += 1
+	ownershipChangedEvent:Fire(player, weaponName, true, reason)
+	scheduleDirtySave(profile)
+	return true, nil
+end
+
+function CurrencyService.ResetOwnedWeapons(player: Player, reason: string)
+	if not validReason(reason) then
+		return false, 0, "INVALID_REASON"
+	end
+	local profile, profileError = getUsableProfile(player)
+	if not profile then
+		return false, 0, profileError
+	end
+
+	local removedWeapons: {string} = {}
+	for weaponName, owned in pairs(profile.data.OwnedWeapons) do
+		if owned == true then
+			table.insert(removedWeapons, weaponName)
+		end
+	end
+	if #removedWeapons == 0 then
+		return true, 0, nil
+	end
+
+	table.clear(profile.data.OwnedWeapons)
+	profile.revision += 1
+	table.sort(removedWeapons)
+	for _, weaponName in ipairs(removedWeapons) do
+		ownershipChangedEvent:Fire(player, weaponName, false, reason)
+	end
+	scheduleDirtySave(profile)
+	return true, #removedWeapons, nil
 end
 
 function CurrencyService.AddCurrency(player: Player, amount: number, reason: string)
@@ -499,6 +770,7 @@ function CurrencyService.SaveNow(player: Player)
 	if not profile then
 		return false, profileError
 	end
+	accruePlayTime(profile, false)
 	return saveProfile(profile, false, false)
 end
 

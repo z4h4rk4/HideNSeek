@@ -2,7 +2,8 @@
 
 local Players = game:GetService("Players")
 
-local MONEY_GUI_NAME = "MoneyPanelGui"
+local ICONS_GUI_NAME = "IconsGui"
+local MAIN_FRAME_NAME = "MainFrame"
 local MONEY_PANEL_NAME = "MoneyPanel"
 local BALANCE_TEXT_NAME = "BalanceText"
 local LEADERSTATS_NAME = "leaderstats"
@@ -13,8 +14,9 @@ local playerGui = localPlayer:WaitForChild("PlayerGui")
 local coinsValue: IntValue? = nil
 
 local function getBalanceText(): TextLabel?
-	local moneyGui = playerGui:FindFirstChild(MONEY_GUI_NAME)
-	local moneyPanel = moneyGui and moneyGui:FindFirstChild(MONEY_PANEL_NAME)
+	local iconsGui = playerGui:FindFirstChild(ICONS_GUI_NAME)
+	local mainFrame = iconsGui and iconsGui:FindFirstChild(MAIN_FRAME_NAME)
+	local moneyPanel = mainFrame and mainFrame:FindFirstChild(MONEY_PANEL_NAME)
 	local balanceText = moneyPanel and moneyPanel:FindFirstChild(BALANCE_TEXT_NAME)
 	if balanceText and balanceText:IsA("TextLabel") then
 		return balanceText

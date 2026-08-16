@@ -14,9 +14,32 @@ function CurrencyCore.IsValidBalance(value: any, maxBalance: number): boolean
 	return isFiniteInteger(value) and value >= 0 and value <= maxBalance
 end
 
+function CurrencyCore.IsValidStat(value: any, maxStatValue: number): boolean
+	return isFiniteInteger(value) and value >= 0 and value <= maxStatValue
+end
+
+local function cloneOwnedWeapons(raw: any): {[string]: boolean}
+	local ownedWeapons: {[string]: boolean} = {}
+	if type(raw) ~= "table" then
+		return ownedWeapons
+	end
+	for weaponName, owned in pairs(raw) do
+		if type(weaponName) == "string"
+			and #weaponName >= 1
+			and #weaponName <= 64
+			and owned == true then
+			ownedWeapons[weaponName] = true
+		end
+	end
+	return ownedWeapons
+end
+
 function CurrencyCore.CloneData(data: any): {[string]: any}
 	return {
 		Currency = data.Currency,
+		OwnedWeapons = cloneOwnedWeapons(data.OwnedWeapons),
+		Wins = data.Wins,
+		PlayTimeSeconds = data.PlayTimeSeconds,
 	}
 end
 
@@ -24,13 +47,17 @@ function CurrencyCore.NormalizeStored(
 	raw: any,
 	expectedVersion: number,
 	startingCurrency: number,
-	maxBalance: number
+	maxBalance: number,
+	maxStatValue: number
 )
 	if raw == nil then
 		return {
 			Version = expectedVersion,
 			Data = {
 				Currency = startingCurrency,
+				OwnedWeapons = {},
+				Wins = 0,
+				PlayTimeSeconds = 0,
 			},
 			SessionId = nil,
 			SessionStart = 0,
@@ -47,6 +74,9 @@ function CurrencyCore.NormalizeStored(
 			Version = expectedVersion,
 			Data = {
 				Currency = raw,
+				OwnedWeapons = {},
+				Wins = 0,
+				PlayTimeSeconds = 0,
 			},
 			SessionId = nil,
 			SessionStart = 0,
@@ -72,10 +102,29 @@ function CurrencyCore.NormalizeStored(
 		return nil, "INVALID_CURRENCY"
 	end
 
+	local wins = rawData.Wins
+	if wins == nil then
+		wins = 0
+	end
+	if not CurrencyCore.IsValidStat(wins, maxStatValue) then
+		return nil, "INVALID_WINS"
+	end
+
+	local playTimeSeconds = rawData.PlayTimeSeconds
+	if playTimeSeconds == nil then
+		playTimeSeconds = 0
+	end
+	if not CurrencyCore.IsValidStat(playTimeSeconds, maxStatValue) then
+		return nil, "INVALID_PLAY_TIME"
+	end
+
 	return {
 		Version = expectedVersion,
 		Data = {
 			Currency = currency,
+			OwnedWeapons = cloneOwnedWeapons(rawData.OwnedWeapons),
+			Wins = wins,
+			PlayTimeSeconds = playTimeSeconds,
 		},
 		SessionId = if type(raw.SessionId) == "string" then raw.SessionId else nil,
 		SessionStart = if isFiniteInteger(raw.SessionStart) then raw.SessionStart else 0,

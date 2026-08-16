@@ -1,8 +1,10 @@
 --!strict
 
+local Debris = game:GetService("Debris")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local ServerStorage = game:GetService("ServerStorage")
+local SoundService = game:GetService("SoundService")
 local Workspace = game:GetService("Workspace")
 
 local Config = require(ReplicatedStorage:WaitForChild("SeekerSearchConfig"))
@@ -42,6 +44,7 @@ type TimerVisual = {
 
 local records: {[Instance]: CageRecord} = {}
 local warnedMissingTemplate = false
+local warnedInvalidSoundTemplates: {[string]: boolean} = {}
 
 local existingFolder = Workspace:FindFirstChild(FOLDER_NAME)
 local cageFolder: Folder
@@ -60,6 +63,41 @@ for _, child in ipairs(cageFolder:GetChildren()) do
 end
 
 local CageService = {}
+
+local function playCageSound(templateName: string, position: Vector3)
+	local template = SoundService:FindFirstChild(templateName)
+	if not template or not template:IsA("Sound") or template.SoundId == "" then
+		if not warnedInvalidSoundTemplates[templateName] then
+			warnedInvalidSoundTemplates[templateName] = true
+			warn(`CageService: SoundService.{templateName} must be a Sound with a SoundId`)
+		end
+		return
+	end
+	warnedInvalidSoundTemplates[templateName] = nil
+
+	local anchor = Instance.new("Part")
+	anchor.Name = templateName .. "SoundAnchor"
+	anchor.Size = Vector3.one * 0.1
+	anchor.CFrame = CFrame.new(position)
+	anchor.Anchored = true
+	anchor.CanCollide = false
+	anchor.CanTouch = false
+	anchor.CanQuery = false
+	anchor.CastShadow = false
+	anchor.Transparency = 1
+	anchor.Parent = Workspace
+
+	local sound = template:Clone()
+	sound.Name = templateName .. "Playback"
+	sound.Looped = false
+	sound.PlayOnRemove = false
+	sound.Parent = anchor
+	sound.Ended:Once(function()
+		anchor:Destroy()
+	end)
+	Debris:AddItem(anchor, CageConfig.SOUND_FALLBACK_LIFETIME_SECONDS)
+	sound:Play()
+end
 
 local function disconnect(record: CageRecord)
 	for _, connection in ipairs(record.connections) do
@@ -98,6 +136,10 @@ function CageService.Remove(owner: Instance)
 		record.rootPart.AssemblyLinearVelocity = Vector3.zero
 		record.rootPart.AssemblyAngularVelocity = Vector3.zero
 	end
+	playCageSound(
+		CageConfig.CAGE_OFF_SOUND_TEMPLATE_NAME,
+		record.cage:GetPivot().Position
+	)
 	record.cage:Destroy()
 end
 
@@ -496,6 +538,7 @@ function CageService.Attach(
 	cage:SetAttribute(OWNER_ATTRIBUTE, owner.Name)
 	cage:SetAttribute(MANAGED_ATTRIBUTE, true)
 	cage.Parent = cageFolder
+	playCageSound(CageConfig.CAGE_ON_SOUND_TEMPLATE_NAME, cage:GetPivot().Position)
 
 	local prompt = makePrompt(cage, firstPart, owner)
 	local timerVisual = makeTimerVisual(cage)
