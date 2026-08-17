@@ -5,8 +5,10 @@ local SearchConfig = require(ReplicatedStorage:WaitForChild("SeekerSearchConfig"
 
 local NAME_TAG_NAME = "OverheadPlayerNameTag"
 local MAX_DISTANCE = 250
-local TAG_SIZE = UDim2.fromOffset(170, 34)
-local TAG_OFFSET = Vector3.new(0, 2.8, 0)
+-- Используем Scale (стады), чтобы размер корректно адаптировался под разные экраны
+local TAG_SIZE = UDim2.fromScale(3, 1)
+-- Подняли высоту, так как крепим к HumanoidRootPart (в районе пояса)
+local TAG_OFFSET = Vector3.new(0, 3.5, 0)
 
 local function getPlayerLabel(player: Player): string
 	local displayName = string.gsub(player.DisplayName or "", "^%s*(.-)%s*$", "%1")
@@ -17,8 +19,8 @@ local function getPlayerLabel(player: Player): string
 	return player.Name
 end
 
-local function createNameTag(player: Player, head: BasePart)
-	local oldTag = head:FindFirstChild(NAME_TAG_NAME)
+local function createNameTag(player: Player, attachPart: BasePart)
+	local oldTag = attachPart:FindFirstChild(NAME_TAG_NAME)
 	if oldTag then
 		oldTag:Destroy()
 	end
@@ -29,11 +31,11 @@ local function createNameTag(player: Player, head: BasePart)
 	billboard.MaxDistance = MAX_DISTANCE
 	billboard.Size = TAG_SIZE
 	billboard.StudsOffsetWorldSpace = TAG_OFFSET
-	billboard.Adornee = head
+	billboard.Adornee = attachPart
 	billboard.Enabled = true
 	billboard.LightInfluence = 0
 	billboard:SetAttribute(SearchConfig.PRESERVE_VISUAL_ATTRIBUTE, true)
-	billboard.Parent = head
+	billboard.Parent = attachPart
 
 	local label = Instance.new("TextLabel")
 	label.Name = "NameLabel"
@@ -48,7 +50,8 @@ local function createNameTag(player: Player, head: BasePart)
 	label.Parent = billboard
 
 	local textSizeConstraint = Instance.new("UITextSizeConstraint")
-	textSizeConstraint.MaxTextSize = 20
+	-- Увеличили макс. размер шрифта, движок сам подберет идеальный благодаря TextScaled
+	textSizeConstraint.MaxTextSize = 50
 	textSizeConstraint.MinTextSize = 10
 	textSizeConstraint.Parent = label
 end
@@ -59,18 +62,19 @@ local function setupCharacter(player: Player, character: Model)
 		humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
 	end
 
-	local head = character:WaitForChild("Head", 10)
-	if not head or not head:IsA("BasePart") or player.Character ~= character then
+	-- Ждем HumanoidRootPart, так как эта часть гарантированно не удаляется при загрузке аватара
+	local rootPart = character:WaitForChild("HumanoidRootPart", 10)
+	if not rootPart or not rootPart:IsA("BasePart") or player.Character ~= character then
 		return
 	end
 
-	createNameTag(player, head)
+	createNameTag(player, rootPart)
 end
 
 local function refreshCharacterName(player: Player)
 	local character = player.Character
-	local head = if character then character:FindFirstChild("Head") else nil
-	local billboard = if head then head:FindFirstChild(NAME_TAG_NAME) else nil
+	local rootPart = if character then character:FindFirstChild("HumanoidRootPart") else nil
+	local billboard = if rootPart then rootPart:FindFirstChild(NAME_TAG_NAME) else nil
 	local label = if billboard then billboard:FindFirstChild("NameLabel") else nil
 	if label and label:IsA("TextLabel") then
 		label.Text = getPlayerLabel(player)
