@@ -8,6 +8,7 @@ local actionCooldownSeconds: {[string]: number} = {
 	AddCoins = 1,
 	RemoveCoins = 1,
 	ResetWeaponPurchases = 2,
+	ResetLikeReward = 2,
 	SetCooldownPassTestState = 0.75,
 	SaveProfile = 3,
 	RespawnPlayer = 1,

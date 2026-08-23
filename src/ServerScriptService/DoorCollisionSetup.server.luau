@@ -1,16 +1,24 @@
 local Players = game:GetService("Players")
 
 local roundModules = script.Parent:WaitForChild("Round")
+local RoundConfig = require(roundModules:WaitForChild("RoundConfig"))
 local DoorCharacterCollider = require(roundModules:WaitForChild("DoorCharacterCollider"))
 
 DoorCharacterCollider.Configure()
 
-local function setupCharacter(character: Model)
+local function getPlayerCollisionGroup(player: Player): string
+	local role = player:GetAttribute("RoundRole")
+	return if role == RoundConfig.ROLE_HIDER or role == RoundConfig.ROLE_SEEKER
+		then DoorCharacterCollider.CHARACTER_COLLISION_GROUP
+		else DoorCharacterCollider.HUB_COLLISION_GROUP
+end
+
+local function setupCharacter(player: Player, character: Model)
 	local function attach()
 		if character.Parent then
 			DoorCharacterCollider.Refresh(
 				character,
-				DoorCharacterCollider.CHARACTER_COLLISION_GROUP
+				getPlayerCollisionGroup(player)
 			)
 		end
 	end
@@ -25,10 +33,17 @@ local function setupCharacter(character: Model)
 end
 
 local function setupPlayer(player: Player)
-	player.CharacterAdded:Connect(setupCharacter)
+	player.CharacterAdded:Connect(function(character)
+		setupCharacter(player, character)
+	end)
+	player:GetAttributeChangedSignal("RoundRole"):Connect(function()
+		if player.Character then
+			setupCharacter(player, player.Character)
+		end
+	end)
 
 	if player.Character then
-		setupCharacter(player.Character)
+		setupCharacter(player, player.Character)
 	end
 end
 

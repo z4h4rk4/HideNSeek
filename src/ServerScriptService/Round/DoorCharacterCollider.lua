@@ -7,6 +7,7 @@ local RoundConfig = require(script.Parent:WaitForChild("RoundConfig"))
 local DOOR_COLLISION_GROUP = "Doors"
 local CHARACTER_COLLISION_GROUP = "Characters"
 local NPC_COLLISION_GROUP = "RoundNPCs"
+local HUB_COLLISION_GROUP = "HubCharacters"
 local PROXY_COLLISION_GROUP = "DoorPushers"
 local SEARCH_RAYCAST_COLLISION_GROUP = "SeekerSearchRaycasts"
 local PROXY_NAME = "_RoundDoorPusher"
@@ -25,6 +26,7 @@ local DoorCharacterCollider = {
 	DOOR_COLLISION_GROUP = DOOR_COLLISION_GROUP,
 	CHARACTER_COLLISION_GROUP = CHARACTER_COLLISION_GROUP,
 	NPC_COLLISION_GROUP = NPC_COLLISION_GROUP,
+	HUB_COLLISION_GROUP = HUB_COLLISION_GROUP,
 	PROXY_COLLISION_GROUP = PROXY_COLLISION_GROUP,
 	SEARCH_RAYCAST_COLLISION_GROUP = SEARCH_RAYCAST_COLLISION_GROUP,
 }
@@ -40,6 +42,7 @@ function DoorCharacterCollider.Configure()
 	registerCollisionGroup(DOOR_COLLISION_GROUP)
 	registerCollisionGroup(CHARACTER_COLLISION_GROUP)
 	registerCollisionGroup(NPC_COLLISION_GROUP)
+	registerCollisionGroup(HUB_COLLISION_GROUP)
 	registerCollisionGroup(PROXY_COLLISION_GROUP)
 	registerCollisionGroup(SEARCH_RAYCAST_COLLISION_GROUP)
 
@@ -75,12 +78,16 @@ function DoorCharacterCollider.Configure()
 
 	PhysicsService:CollisionGroupSetCollidable(CHARACTER_COLLISION_GROUP, "Default", true)
 	PhysicsService:CollisionGroupSetCollidable(NPC_COLLISION_GROUP, "Default", true)
+	PhysicsService:CollisionGroupSetCollidable(HUB_COLLISION_GROUP, "Default", true)
 	PhysicsService:CollisionGroupSetCollidable(
 		NPC_COLLISION_GROUP,
 		CHARACTER_COLLISION_GROUP,
 		false
 	)
 	PhysicsService:CollisionGroupSetCollidable(NPC_COLLISION_GROUP, NPC_COLLISION_GROUP, false)
+	PhysicsService:CollisionGroupSetCollidable(HUB_COLLISION_GROUP, HUB_COLLISION_GROUP, false)
+	PhysicsService:CollisionGroupSetCollidable(HUB_COLLISION_GROUP, CHARACTER_COLLISION_GROUP, false)
+	PhysicsService:CollisionGroupSetCollidable(HUB_COLLISION_GROUP, NPC_COLLISION_GROUP, false)
 end
 
 function DoorCharacterCollider.IsProxy(instance: Instance): boolean
@@ -193,7 +200,8 @@ function DoorCharacterCollider.Refresh(
 ): BasePart?
 	DoorCharacterCollider.Configure()
 	if bodyCollisionGroup ~= CHARACTER_COLLISION_GROUP
-		and bodyCollisionGroup ~= NPC_COLLISION_GROUP then
+		and bodyCollisionGroup ~= NPC_COLLISION_GROUP
+		and bodyCollisionGroup ~= HUB_COLLISION_GROUP then
 		error(`Unsupported character collision group: {bodyCollisionGroup}`)
 	end
 	local rootPart = character:FindFirstChild("HumanoidRootPart")

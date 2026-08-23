@@ -9,8 +9,9 @@ local TELEPORT_CONTAINER_NAME = "Teleport Pads"
 local PAD_ONE_NAME = "Pad1"
 local PAD_TWO_NAME = "Pad2"
 local TELEPORT_REMOTE_NAME = "ArenaTeleported"
-local TELEPORT_COOLDOWN_SECONDS = 1
+local TELEPORT_COOLDOWN_SECONDS = 10
 local DESTINATION_CLEARANCE = 0.5
+local TELEPORT_EXIT_MARGIN = 1.25
 local COOLDOWN_ATTRIBUTE = "ArenaTeleportCooldownUntil"
 local MANAGED_NPC_ATTRIBUTE = "ManagedRoundNPC"
 local ROLE_ATTRIBUTE = "RoundRole"
@@ -33,6 +34,8 @@ local ArenaTeleportService = {
 local registeredPairs: {[Instance]: PairRecord} = {}
 local started = false
 local teleportRemote: RemoteEvent? = nil
+local teleportExitLocks: {[Model]: BasePart} = {}
+local teleportExitLockConnections: {[Model]: RBXScriptConnection} = {}
 
 local function getOrCreateRemote(): RemoteEvent
 	local existing = ReplicatedStorage:FindFirstChild(TELEPORT_REMOTE_NAME)
@@ -65,10 +68,61 @@ local function getTeleportCharacter(hit: BasePart): Model?
 	return nil
 end
 
-function ArenaTeleportService.TeleportCharacter(character: Model, destination: BasePart): boolean
+local function clearTeleportExitLock(character: Model)
+	teleportExitLocks[character] = nil
+	local connection = teleportExitLockConnections[character]
+	if connection then
+		connection:Disconnect()
+		teleportExitLockConnections[character] = nil
+	end
+end
+
+local function characterIsOverPad(character: Model, pad: BasePart): boolean
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if not rootPart or not rootPart:IsA("BasePart") or not pad:IsDescendantOf(workspace) then
+		return false
+	end
+
+	local localPosition = pad.CFrame:PointToObjectSpace(rootPart.Position)
+	local halfX = pad.Size.X * 0.5 + TELEPORT_EXIT_MARGIN
+	local halfZ = pad.Size.Z * 0.5 + TELEPORT_EXIT_MARGIN
+	return math.abs(localPosition.X) <= halfX and math.abs(localPosition.Z) <= halfZ
+end
+
+local function isWaitingForTeleportExit(character: Model): boolean
+	local lockedPad = teleportExitLocks[character]
+	if not lockedPad or not lockedPad.Parent or not character.Parent then
+		clearTeleportExitLock(character)
+		return false
+	end
+	if not characterIsOverPad(character, lockedPad) then
+		clearTeleportExitLock(character)
+		return false
+	end
+	return true
+end
+
+local function lockTeleportUntilExit(character: Model, destination: BasePart)
+	teleportExitLocks[character] = destination
+	if not teleportExitLockConnections[character] then
+		teleportExitLockConnections[character] = character.Destroying:Connect(function()
+			clearTeleportExitLock(character)
+		end)
+	end
+end
+
+function ArenaTeleportService.TeleportCharacter(
+	character: Model,
+	destination: BasePart,
+	source: BasePart?
+): boolean
 	if character:GetAttribute(SeekerSearchConfig.CAGED_ATTRIBUTE) == true then
 		return false
 	end
+	if source and isWaitingForTeleportExit(character) then
+		return false
+	end
+
 	local now = workspace:GetServerTimeNow()
 	local cooldownValue = character:GetAttribute(COOLDOWN_ATTRIBUTE)
 	local cooldownUntil = if type(cooldownValue) == "number" then cooldownValue else 0
@@ -102,6 +156,7 @@ function ArenaTeleportService.TeleportCharacter(character: Model, destination: B
 
 	character:SetAttribute(COOLDOWN_ATTRIBUTE, now + TELEPORT_COOLDOWN_SECONDS)
 	rootPart.CFrame = CFrame.lookAt(targetPosition, targetPosition + horizontalLook)
+	lockTeleportUntilExit(character, destination)
 	rootPart.AssemblyLinearVelocity = Vector3.zero
 	rootPart.AssemblyAngularVelocity = Vector3.zero
 	humanoid.Sit = false
@@ -131,7 +186,7 @@ local function connectTeleportPad(source: BasePart, destination: BasePart, conne
 	table.insert(connections, source.Touched:Connect(function(hit)
 		local character = getTeleportCharacter(hit)
 		if character then
-			ArenaTeleportService.TeleportCharacter(character, destination)
+			ArenaTeleportService.TeleportCharacter(character, destination, source)
 		end
 	end))
 end

@@ -38,11 +38,29 @@ local function validReason(reason: any): boolean
 	return type(reason) == "string" and #reason >= 1 and #reason <= 128
 end
 
+local function validPurchaseId(purchaseId: any): boolean
+	return type(purchaseId) == "string" and #purchaseId >= 1 and #purchaseId <= 128
+end
+
 local function validWeaponName(weaponName: any): boolean
 	return type(weaponName) == "string"
 		and #weaponName >= 1
 		and #weaponName <= 64
 		and string.match(weaponName, "^[%w_%-]+$") ~= nil
+end
+
+local function validSkinId(skinId: any): boolean
+	return type(skinId) == "string"
+		and #skinId >= 1
+		and #skinId <= 64
+		and string.match(skinId, "^[%w_%-]+$") ~= nil
+end
+
+local function validCaseId(caseId: any): boolean
+	return type(caseId) == "string"
+		and #caseId >= 1
+		and #caseId <= 64
+		and string.match(caseId, "^[%w_%-]+$") ~= nil
 end
 
 local function isPermanentDataError(reason: any): boolean
@@ -71,6 +89,26 @@ local function setDisplayedCurrency(profile)
 	if profile.currencyValue and profile.currencyValue.Parent then
 		profile.currencyValue.Value = profile.data.Currency
 	end
+end
+
+local function getSkinCaseRollCounts(profile): {[string]: number}
+	local rollCounts = profile.data.SkinCaseRollCounts
+	if type(rollCounts) ~= "table" then
+		rollCounts = {}
+		profile.data.SkinCaseRollCounts = rollCounts
+	end
+	return rollCounts
+end
+
+local function addSkinCaseRollCount(profile, caseId: string?, rollCount: number)
+	if not validCaseId(caseId) or rollCount <= 0 then
+		return
+	end
+	local normalizedCaseId = caseId :: string
+	local rollCounts = getSkinCaseRollCounts(profile)
+	local current = rollCounts[normalizedCaseId]
+	rollCounts[normalizedCaseId] = (if type(current) == "number" and current >= 0 then current else 0)
+		+ rollCount
 end
 
 local function invalidateSession(profile, reason: string)
@@ -488,6 +526,58 @@ local function applyDelta(player: Player, delta: number, reason: string)
 	return true, nextBalance, nil
 end
 
+local function getDeveloperProductReceipts(profile): {[string]: number}
+	local receipts = profile.data.DeveloperProductReceipts
+	if type(receipts) ~= "table" then
+		receipts = {}
+		profile.data.DeveloperProductReceipts = receipts
+	end
+	return receipts
+end
+
+local function getOwnedSkins(profile): {[string]: boolean}
+	local ownedSkins = profile.data.OwnedSkins
+	if type(ownedSkins) ~= "table" then
+		ownedSkins = {}
+		profile.data.OwnedSkins = ownedSkins
+	end
+	return ownedSkins
+end
+
+local function copyOwnedSkins(raw: {[string]: boolean}): {[string]: boolean}
+	local copy: {[string]: boolean} = {}
+	for skinId, owned in pairs(raw) do
+		if owned == true then
+			copy[skinId] = true
+		end
+	end
+	return copy
+end
+
+local function pruneDeveloperProductReceipts(receipts: {[string]: number})
+	local count = 0
+	for _ in pairs(receipts) do
+		count += 1
+	end
+
+	local maxReceipts = CurrencyConfig.MAX_DEVELOPER_PRODUCT_RECEIPTS
+	while count > maxReceipts do
+		local oldestId: string? = nil
+		local oldestTime: number? = nil
+		for purchaseId, processedAt in pairs(receipts) do
+			if oldestTime == nil or processedAt < oldestTime then
+				oldestId = purchaseId
+				oldestTime = processedAt
+			end
+		end
+		if not oldestId then
+			return
+		end
+		receipts[oldestId] = nil
+		count -= 1
+	end
+end
+
 function CurrencyService.Start()
 	if started then
 		return
@@ -658,6 +748,150 @@ function CurrencyService.GetOwnedWeapons(player: Player): {[string]: boolean}?
 	return copy
 end
 
+function CurrencyService.GetOwnedSkins(player: Player): {[string]: boolean}?
+	local profile = getUsableProfile(player)
+	if not profile then
+		return nil
+	end
+	return copyOwnedSkins(getOwnedSkins(profile))
+end
+
+function CurrencyService.GetEquippedSkin(player: Player): string?
+	local profile = getUsableProfile(player)
+	if not profile then
+		return nil
+	end
+	local equippedSkin = profile.data.EquippedSkin
+	return if type(equippedSkin) == "string" then equippedSkin else nil
+end
+
+function CurrencyService.GetSkinCaseRollCount(player: Player, caseId: string): number
+	if not validCaseId(caseId) then
+		return 0
+	end
+	local profile = getUsableProfile(player)
+	if not profile then
+		return 0
+	end
+	local rollCount = getSkinCaseRollCounts(profile)[caseId]
+	return if type(rollCount) == "number" and rollCount >= 0 then rollCount else 0
+end
+
+function CurrencyService.EquipSkin(player: Player, skinId: string, reason: string)
+	if not validSkinId(skinId) or not validReason(reason) then
+		return false, "INVALID_EQUIP"
+	end
+	local profile, profileError = getUsableProfile(player)
+	if not profile then
+		return false, profileError
+	end
+	local ownedSkins = getOwnedSkins(profile)
+	if ownedSkins[skinId] ~= true then
+		return false, "NOT_OWNED"
+	end
+	if profile.data.EquippedSkin == skinId then
+		return true, nil
+	end
+
+	profile.data.EquippedSkin = skinId
+	profile.revision += 1
+	scheduleDirtySave(profile)
+	return true, nil
+end
+
+function CurrencyService.PurchaseSkinCaseRolls(
+	player: Player,
+	price: number,
+	skinIds: {string},
+	duplicateRewards: {[string]: number},
+	reason: string,
+	caseId: string?
+)
+	if type(price) ~= "number"
+		or price ~= price
+		or price % 1 ~= 0
+		or price <= 0
+		or price > CurrencyConfig.MAX_TRANSACTION
+		or not validReason(reason) then
+		return false, nil, "INVALID_PURCHASE"
+	end
+	if #skinIds < 1 then
+		return false, nil, "INVALID_ROLLS"
+	end
+	for _, skinId in ipairs(skinIds) do
+		if not validSkinId(skinId) then
+			return false, nil, "INVALID_SKIN"
+		end
+	end
+
+	local profile, profileError = getUsableProfile(player)
+	if not profile then
+		return false, nil, profileError
+	end
+
+	local nextBalance, amountError = CurrencyCore.ApplyDelta(
+		profile.data.Currency,
+		-price,
+		CurrencyConfig.MAX_BALANCE,
+		CurrencyConfig.MAX_TRANSACTION
+	)
+	if not nextBalance then
+		return false, profile.data.Currency, amountError
+	end
+
+	local ownedSkins = getOwnedSkins(profile)
+	local results = {}
+	local duplicateCoins = 0
+	for _, skinId in ipairs(skinIds) do
+		local duplicate = ownedSkins[skinId] == true
+		if duplicate then
+			local reward = duplicateRewards[skinId] or 0
+			if reward > 0 then
+				duplicateCoins += reward
+			end
+		else
+			ownedSkins[skinId] = true
+		end
+		table.insert(results, {
+			SkinId = skinId,
+			Duplicate = duplicate,
+			DuplicateCoins = if duplicate then duplicateRewards[skinId] or 0 else 0,
+		})
+	end
+
+	if duplicateCoins > 0 then
+		local rewardedBalance, rewardError = CurrencyCore.ApplyDelta(
+			nextBalance,
+			duplicateCoins,
+			CurrencyConfig.MAX_BALANCE,
+			CurrencyConfig.MAX_TRANSACTION
+		)
+		if not rewardedBalance then
+			return false, profile.data.Currency, rewardError
+		end
+		nextBalance = rewardedBalance
+	end
+
+	profile.data.Currency = nextBalance
+	addSkinCaseRollCount(profile, caseId, #skinIds)
+	profile.revision += 1
+	setDisplayedCurrency(profile)
+	changedEvent:Fire(player, nextBalance, -price + duplicateCoins, reason)
+	scheduleDirtySave(profile)
+
+	local saved, saveError = saveProfile(profile, false, false)
+	if not saved then
+		warn(`[Currency] Skin case save deferred for {player.Name}: {tostring(saveError)}`)
+	end
+	return true, {
+		Balance = nextBalance,
+		Results = results,
+		OwnedSkins = copyOwnedSkins(ownedSkins),
+		EquippedSkin = CurrencyService.GetEquippedSkin(player),
+		DuplicateCoins = duplicateCoins,
+	}, nil
+end
+
 function CurrencyService.PurchaseWeapon(
 	player: Player,
 	weaponName: string,
@@ -756,6 +990,147 @@ function CurrencyService.AddCurrency(player: Player, amount: number, reason: str
 		return false, nil, "INVALID_AMOUNT"
 	end
 	return applyDelta(player, amount, reason)
+end
+
+function CurrencyService.GrantDeveloperProduct(
+	player: Player,
+	purchaseId: string,
+	amount: number,
+	reason: string
+)
+	if not validPurchaseId(purchaseId) then
+		return false, nil, "INVALID_PURCHASE_ID"
+	end
+	if type(amount) ~= "number" or amount <= 0 then
+		return false, nil, "INVALID_AMOUNT"
+	end
+	if not validReason(reason) then
+		return false, nil, "INVALID_REASON"
+	end
+
+	local profile, profileError = getUsableProfile(player)
+	if not profile then
+		return false, nil, profileError
+	end
+
+	local receipts = getDeveloperProductReceipts(profile)
+	if receipts[purchaseId] ~= nil then
+		local saved, saveError = saveProfile(profile, false, false)
+		if not saved then
+			return false, profile.data.Currency, saveError
+		end
+		return true, profile.data.Currency, "ALREADY_GRANTED"
+	end
+
+	local nextBalance, amountError = CurrencyCore.ApplyDelta(
+		profile.data.Currency,
+		amount,
+		CurrencyConfig.MAX_BALANCE,
+		CurrencyConfig.MAX_TRANSACTION
+	)
+	if not nextBalance then
+		return false, profile.data.Currency, amountError
+	end
+
+	profile.data.Currency = nextBalance
+	receipts[purchaseId] = os.time()
+	pruneDeveloperProductReceipts(receipts)
+	profile.revision += 1
+	setDisplayedCurrency(profile)
+	changedEvent:Fire(player, nextBalance, amount, reason)
+
+	local saved, saveError = saveProfile(profile, false, false)
+	if not saved then
+		return false, profile.data.Currency, saveError
+	end
+	return true, nextBalance, nil
+end
+
+function CurrencyService.GrantDeveloperProductSkinCaseRoll(
+	player: Player,
+	purchaseId: string,
+	skinId: string,
+	duplicateReward: number,
+	reason: string,
+	caseId: string?
+)
+	if not validPurchaseId(purchaseId) then
+		return false, nil, "INVALID_PURCHASE_ID"
+	end
+	if not validSkinId(skinId) or not validReason(reason) then
+		return false, nil, "INVALID_SKIN"
+	end
+	if type(duplicateReward) ~= "number"
+		or duplicateReward ~= duplicateReward
+		or duplicateReward % 1 ~= 0
+		or duplicateReward < 0
+		or duplicateReward > CurrencyConfig.MAX_TRANSACTION then
+		return false, nil, "INVALID_DUPLICATE_REWARD"
+	end
+
+	local profile, profileError = getUsableProfile(player)
+	if not profile then
+		return false, nil, profileError
+	end
+
+	local receipts = getDeveloperProductReceipts(profile)
+	if receipts[purchaseId] ~= nil then
+		local saved, saveError = saveProfile(profile, false, false)
+		if not saved then
+			return false, nil, saveError
+		end
+		return true, {
+			Balance = profile.data.Currency,
+			AlreadyGranted = true,
+			OwnedSkins = copyOwnedSkins(getOwnedSkins(profile)),
+			EquippedSkin = CurrencyService.GetEquippedSkin(player),
+		}, "ALREADY_GRANTED"
+	end
+
+	local ownedSkins = getOwnedSkins(profile)
+	local duplicate = ownedSkins[skinId] == true
+	local nextBalance = profile.data.Currency
+	if duplicate and duplicateReward > 0 then
+		local rewardedBalance, rewardError = CurrencyCore.ApplyDelta(
+			nextBalance,
+			duplicateReward,
+			CurrencyConfig.MAX_BALANCE,
+			CurrencyConfig.MAX_TRANSACTION
+		)
+		if not rewardedBalance then
+			return false, nil, rewardError
+		end
+		nextBalance = rewardedBalance
+	else
+		ownedSkins[skinId] = true
+	end
+
+	profile.data.Currency = nextBalance
+	addSkinCaseRollCount(profile, caseId, 1)
+	receipts[purchaseId] = os.time()
+	pruneDeveloperProductReceipts(receipts)
+	profile.revision += 1
+	if duplicate and duplicateReward > 0 then
+		setDisplayedCurrency(profile)
+		changedEvent:Fire(player, nextBalance, duplicateReward, reason)
+	end
+	scheduleDirtySave(profile)
+
+	local saved, saveError = saveProfile(profile, false, false)
+	if not saved then
+		return false, nil, saveError
+	end
+	return true, {
+		Balance = nextBalance,
+		Result = {
+			SkinId = skinId,
+			Duplicate = duplicate,
+			DuplicateCoins = if duplicate then duplicateReward else 0,
+		},
+		OwnedSkins = copyOwnedSkins(ownedSkins),
+		EquippedSkin = CurrencyService.GetEquippedSkin(player),
+		DuplicateCoins = if duplicate then duplicateReward else 0,
+	}, nil
 end
 
 function CurrencyService.SpendCurrency(player: Player, amount: number, reason: string)

@@ -1,6 +1,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local GamePassConfig = require(ReplicatedStorage:WaitForChild("CooldownPassConfig"))
 local SearchConfig = require(ReplicatedStorage:WaitForChild("SeekerSearchConfig"))
 
 local NAME_TAG_NAME = "OverheadPlayerNameTag"
@@ -9,14 +10,26 @@ local MAX_DISTANCE = 250
 local TAG_SIZE = UDim2.fromScale(3, 1)
 -- Подняли высоту, так как крепим к HumanoidRootPart (в районе пояса)
 local TAG_OFFSET = Vector3.new(0, 3.5, 0)
+local DEFAULT_TEXT_COLOR = Color3.fromRGB(255, 255, 255)
+local VIP_TEXT_COLOR = Color3.fromRGB(255, 214, 64)
 
 local function getPlayerLabel(player: Player): string
 	local displayName = string.gsub(player.DisplayName or "", "^%s*(.-)%s*$", "%1")
+	local name = if displayName ~= "" then displayName else player.Name
+	if player:GetAttribute(GamePassConfig.VIP_OWNED_ATTRIBUTE) == true then
+		return `[VIP] {name}`
+	end
 	if displayName ~= "" then
 		return displayName
 	end
 
 	return player.Name
+end
+
+local function getPlayerLabelColor(player: Player): Color3
+	return if player:GetAttribute(GamePassConfig.VIP_OWNED_ATTRIBUTE) == true
+		then VIP_TEXT_COLOR
+		else DEFAULT_TEXT_COLOR
 end
 
 local function createNameTag(player: Player, attachPart: BasePart)
@@ -43,7 +56,7 @@ local function createNameTag(player: Player, attachPart: BasePart)
 	label.Size = UDim2.fromScale(1, 1)
 	label.Font = Enum.Font.GothamBold
 	label.Text = getPlayerLabel(player)
-	label.TextColor3 = Color3.fromRGB(255, 255, 255)
+	label.TextColor3 = getPlayerLabelColor(player)
 	label.TextScaled = true
 	label.TextStrokeColor3 = Color3.fromRGB(15, 18, 25)
 	label.TextStrokeTransparency = 0.15
@@ -78,6 +91,7 @@ local function refreshCharacterName(player: Player)
 	local label = if billboard then billboard:FindFirstChild("NameLabel") else nil
 	if label and label:IsA("TextLabel") then
 		label.Text = getPlayerLabel(player)
+		label.TextColor3 = getPlayerLabelColor(player)
 	end
 end
 
@@ -87,6 +101,9 @@ local function setupPlayer(player: Player)
 	end)
 
 	player:GetPropertyChangedSignal("DisplayName"):Connect(function()
+		refreshCharacterName(player)
+	end)
+	player:GetAttributeChangedSignal(GamePassConfig.VIP_OWNED_ATTRIBUTE):Connect(function()
 		refreshCharacterName(player)
 	end)
 

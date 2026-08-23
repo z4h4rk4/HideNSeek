@@ -30,6 +30,7 @@ local TARGET_ACTIONS = {
 	AddCoins = true,
 	RemoveCoins = true,
 	ResetWeaponPurchases = true,
+	ResetLikeReward = true,
 	SetCooldownPassTestState = true,
 	SaveProfile = true,
 	SetRole = true,
@@ -538,12 +539,26 @@ local resetWeaponPurchasesButton = makeButton(
 	UDim2.fromOffset(16, 70),
 	UDim2.new(1, -32, 0, 40)
 )
+local freePrizeCard = makeCard(
+	pages.Economy,
+	"Free Prize UI",
+	"Clears this player's claimed Free reward state and shows the Free button again.",
+	126,
+	4
+)
+local resetFreePrizeButton = makeButton(
+	freePrizeCard,
+	"Reset Free Prize",
+	COLORS.blue,
+	UDim2.fromOffset(16, 70),
+	UDim2.new(1, -32, 0, 40)
+)
 local cooldownPassCard = makeCard(
 	pages.Economy,
 	"Cooldown Pass Test",
 	"Your admin account only. Temporary; never grants or revokes the real Roblox pass.",
 	174,
-	4
+	5
 )
 local cooldownPassStatusLabel = addLabel(
 	cooldownPassCard,
@@ -581,7 +596,7 @@ local saveCard = makeCard(
 	"Profile Persistence",
 	"Request an immediate DataStore save for the selected loaded profile.",
 	126,
-	5
+	6
 )
 local saveProfileButton = makeButton(
 	saveCard,
@@ -852,6 +867,7 @@ local requestButtons = {
 	addCoinsButton,
 	removeCoinsButton,
 	resetWeaponPurchasesButton,
+	resetFreePrizeButton,
 	simulateNoPassButton,
 	simulateOwnedPassButton,
 	restorePassOwnershipButton,
@@ -1254,6 +1270,9 @@ bindConfirmedAction(
 )
 bindConfirmedAction(resetWeaponPurchasesButton, function()
 	sendRequest("ResetWeaponPurchases")
+end)
+bindConfirmedAction(resetFreePrizeButton, function()
+	sendRequest("ResetLikeReward")
 end)
 simulateNoPassButton.Activated:Connect(function()
 	sendRequest("SetCooldownPassTestState", { State = "Unowned" })

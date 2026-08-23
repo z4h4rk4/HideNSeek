@@ -16,6 +16,7 @@ local PHASE_ROUND = "Round"
 local BUTTON_NAMES: {[string]: boolean} = table.freeze({
 	FreeBtn = true,
 	InventoryBtn = true,
+	SkinsBtn = true,
 	ShopBtn = true,
 	[CooldownPassConfig.PANEL_NAME] = true,
 })
@@ -33,6 +34,27 @@ local buttonStates: {[GuiObject]: ButtonState} = {}
 
 local function isCooldownPassPanel(button: GuiObject): boolean
 	return button.Name == CooldownPassConfig.PANEL_NAME
+end
+
+local function isTopBarIcon(button: GuiObject): boolean
+	local iconFrame = button.Parent
+	local mainFrame = iconFrame and iconFrame.Parent
+	local iconsGui = mainFrame and mainFrame.Parent
+	return iconFrame ~= nil
+		and iconFrame.Name == "IconFrame"
+		and mainFrame ~= nil
+		and mainFrame.Name == "MainFrame"
+		and iconsGui ~= nil
+		and iconsGui.Name == "IconsGui"
+		and iconsGui:IsDescendantOf(playerGui)
+end
+
+local function shouldTrackButton(button: GuiObject): boolean
+	if isCooldownPassPanel(button) then
+		local iconsGui = playerGui:FindFirstChild("IconsGui")
+		return iconsGui ~= nil and button:IsDescendantOf(iconsGui)
+	end
+	return isTopBarIcon(button)
 end
 
 local function shouldHideButtons(): boolean
@@ -69,7 +91,8 @@ end
 local function trackButton(instance: Instance)
 	if not BUTTON_NAMES[instance.Name]
 		or not instance:IsA("GuiObject")
-		or buttonStates[instance] then
+		or buttonStates[instance]
+		or not shouldTrackButton(instance :: GuiObject) then
 		return
 	end
 

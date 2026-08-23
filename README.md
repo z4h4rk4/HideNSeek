@@ -657,6 +657,7 @@ Game Settings -> Security -> Enable Studio Access to API Services
 | `LowPolyWaterNpcAnimation.server.luau` | включает те же водные анимации и пространственный `SwimSound` для NPC |
 | `BatAttack.client.luau` | переключаемые `Fists`/`BatModel`/`CageModel`/`TrashCan`, чередование рук; атака через `AttackGui/AttackFrame/FistBtn` |
 | `InventoryController.client.luau` | открывает `InventoryGui` с кнопки `IconsGui/MainFrame/IconFrame/InventoryBtn`, закрывает через `CloseBtn`, на телефонах скрывает остальные GUI и включает blur |
+| `SkinsController.client.luau` | открывает `SkinShopGui.SkinsMainFrame` с кнопки `IconsGui/MainFrame/IconFrame/SkinsBtn`, закрывает через `CloseBtn`, на телефонах скрывает остальные GUI и включает blur |
 
 Изометрическая камера использует смещение `Vector3.new(0, 40, 10)`, FOV `35` и
 автоматически возвращает стандартную камеру, когда игрок выходит из активной

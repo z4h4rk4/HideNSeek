@@ -34,10 +34,63 @@ local function cloneOwnedWeapons(raw: any): {[string]: boolean}
 	return ownedWeapons
 end
 
+local function cloneOwnedSkins(raw: any): {[string]: boolean}
+	local ownedSkins: {[string]: boolean} = {}
+	if type(raw) ~= "table" then
+		return ownedSkins
+	end
+	for skinId, owned in pairs(raw) do
+		if type(skinId) == "string"
+			and #skinId >= 1
+			and #skinId <= 64
+			and owned == true then
+			ownedSkins[skinId] = true
+		end
+	end
+	return ownedSkins
+end
+
+local function cloneDeveloperProductReceipts(raw: any): {[string]: number}
+	local receipts: {[string]: number} = {}
+	if type(raw) ~= "table" then
+		return receipts
+	end
+	for purchaseId, processedAt in pairs(raw) do
+		if type(purchaseId) == "string"
+			and #purchaseId >= 1
+			and #purchaseId <= 128
+			and isFiniteInteger(processedAt) then
+			receipts[purchaseId] = processedAt
+		end
+	end
+	return receipts
+end
+
+local function cloneSkinCaseRollCounts(raw: any): {[string]: number}
+	local rollCounts: {[string]: number} = {}
+	if type(raw) ~= "table" then
+		return rollCounts
+	end
+	for caseId, rollCount in pairs(raw) do
+		if type(caseId) == "string"
+			and #caseId >= 1
+			and #caseId <= 64
+			and isFiniteInteger(rollCount)
+			and rollCount >= 0 then
+			rollCounts[caseId] = rollCount
+		end
+	end
+	return rollCounts
+end
+
 function CurrencyCore.CloneData(data: any): {[string]: any}
 	return {
 		Currency = data.Currency,
 		OwnedWeapons = cloneOwnedWeapons(data.OwnedWeapons),
+		OwnedSkins = cloneOwnedSkins(data.OwnedSkins),
+		EquippedSkin = if type(data.EquippedSkin) == "string" then data.EquippedSkin else nil,
+		DeveloperProductReceipts = cloneDeveloperProductReceipts(data.DeveloperProductReceipts),
+		SkinCaseRollCounts = cloneSkinCaseRollCounts(data.SkinCaseRollCounts),
 		Wins = data.Wins,
 		PlayTimeSeconds = data.PlayTimeSeconds,
 	}
@@ -56,6 +109,10 @@ function CurrencyCore.NormalizeStored(
 			Data = {
 				Currency = startingCurrency,
 				OwnedWeapons = {},
+				OwnedSkins = {},
+				EquippedSkin = nil,
+				DeveloperProductReceipts = {},
+				SkinCaseRollCounts = {},
 				Wins = 0,
 				PlayTimeSeconds = 0,
 			},
@@ -75,6 +132,10 @@ function CurrencyCore.NormalizeStored(
 			Data = {
 				Currency = raw,
 				OwnedWeapons = {},
+				OwnedSkins = {},
+				EquippedSkin = nil,
+				DeveloperProductReceipts = {},
+				SkinCaseRollCounts = {},
 				Wins = 0,
 				PlayTimeSeconds = 0,
 			},
@@ -123,6 +184,10 @@ function CurrencyCore.NormalizeStored(
 		Data = {
 			Currency = currency,
 			OwnedWeapons = cloneOwnedWeapons(rawData.OwnedWeapons),
+			OwnedSkins = cloneOwnedSkins(rawData.OwnedSkins),
+			EquippedSkin = if type(rawData.EquippedSkin) == "string" then rawData.EquippedSkin else nil,
+			DeveloperProductReceipts = cloneDeveloperProductReceipts(rawData.DeveloperProductReceipts),
+			SkinCaseRollCounts = cloneSkinCaseRollCounts(rawData.SkinCaseRollCounts),
 			Wins = wins,
 			PlayTimeSeconds = playTimeSeconds,
 		},

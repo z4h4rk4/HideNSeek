@@ -3,9 +3,13 @@
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
 
 local CollectibleConfig = require(script.Parent:WaitForChild("CollectibleConfig"))
 local CurrencyService = require(script.Parent:WaitForChild("CurrencyService"))
+local GamePassService = require(
+	ServerScriptService:WaitForChild("WeaponShop"):WaitForChild("CooldownPassService")
+)
 
 local CollectibleService = {}
 
@@ -94,9 +98,10 @@ local function collect(collectible: Instance, collectibleType, hit: BasePart)
 	end
 
 	claimed[collectible] = true
+	local reward, previousCashRemainder = GamePassService.ApplyCashMultiplier(player, collectibleType.Reward)
 	local ok, _, reason = CurrencyService.AddCurrency(
 		player,
-		collectibleType.Reward,
+		reward,
 		collectibleType.Reason
 	)
 	if ok then
@@ -108,9 +113,10 @@ local function collect(collectible: Instance, collectibleType, hit: BasePart)
 	end
 
 	claimed[collectible] = nil
+	GamePassService.RestoreCashMultiplierRemainder(player, previousCashRemainder)
 	if reason ~= "NOT_LOADED" and reason ~= "PROFILE_CLOSING" then
 		warn(("[Collectible] Could not grant %d Coins to %s: %s"):format(
-			collectibleType.Reward,
+			reward,
 			player.Name,
 			tostring(reason)
 		))
@@ -182,7 +188,7 @@ function CollectibleService.Start()
 		)
 	end
 
-	print("[Collectible] Coin rewards enabled: Coin=1, GoldBar=3")
+	print("[Collectible] Coin rewards enabled with game pass multipliers")
 end
 
 return CollectibleService

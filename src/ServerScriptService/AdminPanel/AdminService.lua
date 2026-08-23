@@ -2,6 +2,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
 local Workspace = game:GetService("Workspace")
 
 local Config = require(script.Parent:WaitForChild("AdminConfig"))
@@ -24,6 +25,8 @@ local MAX_NPC_POPULATION = math.min(
 )
 
 local AdminService = {}
+
+local LIKE_REWARD_ADMIN_RESET_BINDABLE_NAME = "LikeRewardAdminReset"
 
 local TARGET_KEYS = table.freeze({
 	Action = true,
@@ -94,6 +97,7 @@ local ACTION_SCHEMAS: {[string]: Schema} = table.freeze({
 	AddCoins = { Keys = AMOUNT_KEYS, NeedsTarget = true, Mutation = true },
 	RemoveCoins = { Keys = AMOUNT_KEYS, NeedsTarget = true, Mutation = true },
 	ResetWeaponPurchases = { Keys = TARGET_KEYS, NeedsTarget = true, Mutation = true },
+	ResetLikeReward = { Keys = TARGET_KEYS, NeedsTarget = true, Mutation = true },
 	SetCooldownPassTestState = {
 		Keys = COOLDOWN_PASS_TEST_KEYS,
 		NeedsTarget = true,
@@ -368,6 +372,29 @@ local function executeRoundAction(
 	return response(true, nil, message, nil, responseData)
 end
 
+local function resetLikeReward(target: Player): (boolean, string?)
+	local bindable = ServerScriptService:WaitForChild(
+		LIKE_REWARD_ADMIN_RESET_BINDABLE_NAME,
+		5
+	)
+	if not bindable or not bindable:IsA("BindableFunction") then
+		return false, "LIKE_REWARD_SERVICE_UNAVAILABLE"
+	end
+
+	local invoked, ok, reason = pcall(function()
+		return (bindable :: BindableFunction):Invoke(target)
+	end)
+	if not invoked then
+		warn(("[AdminPanel] Like reward reset failed for %s (%d): %s"):format(
+			target.Name,
+			target.UserId,
+			tostring(ok)
+		))
+		return false, "LIKE_REWARD_RESET_FAILED"
+	end
+	return ok == true, if ok == true then nil else tostring(reason or "LIKE_REWARD_RESET_FAILED")
+end
+
 function AdminService.IsAuthorized(player: Player): boolean
 	return Validation.IsAuthorizedUserId(player.UserId, Config.AllowedUserIds)
 end
@@ -479,6 +506,22 @@ function AdminService.HandleRequest(admin: Player, payload: any)
 			RemovedWeaponCount = removedCount,
 			SavedImmediately = saved,
 		})
+	end
+
+	if action == "ResetLikeReward" then
+		local targetPlayer = target :: Player
+		local reset, resetError = resetLikeReward(targetPlayer)
+		if not reset then
+			return failure(resetError, "Free prize claim state could not be reset.")
+		end
+		audit(admin, action, targetPlayer, "reset=true")
+		return response(
+			true,
+			nil,
+			"Free prize UI reset. The player can claim it again.",
+			safeBuildSnapshot(targetPlayer),
+			nil
+		)
 	end
 
 	if action == "SetCooldownPassTestState" then

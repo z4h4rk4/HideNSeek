@@ -4,13 +4,13 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local ServerStorage = game:GetService("ServerStorage")
-local StarterPlayer = game:GetService("StarterPlayer")
 local Teams = game:GetService("Teams")
 local Workspace = game:GetService("Workspace")
 
 local roundModules = script.Parent:WaitForChild("Round")
 local RoundConfig = require(roundModules:WaitForChild("RoundConfig"))
 local DoorCharacterCollider = require(roundModules:WaitForChild("DoorCharacterCollider"))
+local SkinCaseConfig = require(ReplicatedStorage:WaitForChild("SkinCaseConfig"))
 local SeekerSearchConfig = require(ReplicatedStorage:WaitForChild("SeekerSearchConfig"))
 local WeaponShopConfig = require(ReplicatedStorage:WaitForChild("WeaponShopConfig"))
 local HiderEvidenceService = require(roundModules:WaitForChild("HiderEvidenceService"))
@@ -28,7 +28,8 @@ local STATE_NAME = "RoundState"
 local HIDER_TEAM_NAME = "Hiders"
 local SEEKER_TEAM_NAME = "Seekers"
 local NPC_FOLDER_NAME = "RoundNPCs"
-local STARTER_CHARACTER_NAME = "StarterCharacter"
+local CHARACTERS_CONTAINER_NAME = "Characters"
+local HIDER_STARTER_PACK_NAME = "StarterPack"
 local HUNTER_CHARACTER_NAME = "HunterCharacter"
 local HUB_CONTAINER_NAME = "HUB"
 local HUB_SPAWN_NAME = "SpawnHUB"
@@ -36,6 +37,8 @@ local ARENA_SPAWN_NAME = "SpawnArena"
 local ARENA_TEMPLATES_CONTAINER_NAME = "Arenas"
 local BASE_ARENA_NAME = "BaseArena"
 local RUNTIME_ARENA_ATTRIBUTE = "RoundRuntimeArena"
+local PLAYER_SKIN_CHARACTER_ATTRIBUTE = "PlayerSkinCharacter"
+local PLAYER_SKIN_ID_ATTRIBUTE = "PlayerSkinId"
 
 local STARTING_DURATION_SECONDS = RoundConfig.STARTING_DURATION_SECONDS
 local ROUND_DURATION_SECONDS = RoundConfig.ROUND_DURATION_SECONDS
@@ -89,6 +92,14 @@ if not baseArena then
 	baseArena = ServerStorage:FindFirstChild(BASE_ARENA_NAME)
 end
 local roundParticipants: {[Player]: string} = {}
+local missingPlayerSkinWarned: {[string]: boolean} = {}
+local applyEquippedPlayerSkin: (Player) -> boolean = function()
+	return false
+end
+local resetPlayerSkinCharacter: (Player) -> boolean = function()
+	return false
+end
+local lastRoundTopDebugState = ""
 
 type AdminNpcPopulation = {
 	Hiders: number,
@@ -161,10 +172,13 @@ roundState:SetAttribute("MaxHiders", MAX_HIDERS)
 roundState:SetAttribute("MaxSeekers", MAX_SEEKERS)
 roundState:SetAttribute("MinimumPlayers", MINIMUM_PLAYERS)
 roundState:SetAttribute("BotSeekerMode", BOT_SEEKER_MODE)
+roundState:SetAttribute("ExpectedHiderCount", 0)
 roundState:SetAttribute("HiderCount", 0)
 roundState:SetAttribute("CaughtHiderCount", 0)
 roundState:SetAttribute("SeekerCount", 0)
 roundState:SetAttribute("NpcCount", 0)
+roundState:SetAttribute("NpcHiderCount", 0)
+roundState:SetAttribute("NpcSeekerCount", 0)
 roundState:SetAttribute("Phase", PHASE_WAITING)
 roundState:SetAttribute("EndsAt", 0)
 roundState:SetAttribute("NpcAIEnabled", true)
@@ -690,7 +704,9 @@ local function applyCharacterRoleScale(character: Model, role: string)
 		character,
 		if character:GetAttribute(MANAGED_NPC_ATTRIBUTE) == true
 			then DoorCharacterCollider.NPC_COLLISION_GROUP
-			else DoorCharacterCollider.CHARACTER_COLLISION_GROUP
+			elseif role == ROLE_HIDER or role == ROLE_SEEKER
+			then DoorCharacterCollider.CHARACTER_COLLISION_GROUP
+			else DoorCharacterCollider.HUB_COLLISION_GROUP
 	)
 end
 
@@ -751,6 +767,7 @@ local function setSpectator(player: Player, caught: boolean?)
 	player:SetAttribute(ROUND_SPAWN_SLOT_ATTRIBUTE, nil)
 	player.Team = nil
 	player.Neutral = true
+	applyEquippedPlayerSkin(player)
 	applyPlayerRoleScale(player)
 	relocatePlayerForCurrentState(player)
 	refreshPlayerRoundState(player)
@@ -768,6 +785,11 @@ local function setPlayerRole(player: Player, role: string, preferredSpawnSlot: n
 	player:SetAttribute("RoundRole", role)
 	player.Team = if role == ROLE_SEEKER then seekerTeam else hiderTeam
 	player.Neutral = false
+	if role == ROLE_SEEKER then
+		resetPlayerSkinCharacter(player)
+	else
+		applyEquippedPlayerSkin(player)
+	end
 	applyPlayerRoleScale(player)
 	relocatePlayerForCurrentState(player)
 	refreshPlayerRoundState(player)
@@ -787,9 +809,12 @@ local function resetRoles(preserveCaughtResults: boolean?)
 		caughtHiderCount = 0
 	end
 	roundState:SetAttribute("HiderCount", 0)
+	roundState:SetAttribute("ExpectedHiderCount", 0)
 	roundState:SetAttribute("CaughtHiderCount", caughtHiderCount)
 	roundState:SetAttribute("SeekerCount", 0)
 	roundState:SetAttribute("NpcCount", 0)
+	roundState:SetAttribute("NpcHiderCount", 0)
+	roundState:SetAttribute("NpcSeekerCount", 0)
 end
 
 local function getRoleCounts(): (number, number)
@@ -856,19 +881,57 @@ local function getNpcRoleCounts(): (number, number)
 	return hiders, seekers
 end
 
-local function getAutomaticHiderNpcTarget(): number
-	local configuredTarget = AUTOMATIC_HIDER_NPC_COUNTS[#Players:GetPlayers()]
+local function getAutomaticHiderNpcTargetForPlayerCount(playerCount: number): number
+	local configuredTarget = AUTOMATIC_HIDER_NPC_COUNTS[playerCount]
 	return if type(configuredTarget) == "number"
 		then math.clamp(math.floor(configuredTarget), 0, MAX_ACTIVE_NPCS)
 		else 0
 end
 
+local function getAutomaticHiderNpcTarget(): number
+	return getAutomaticHiderNpcTargetForPlayerCount(#Players:GetPlayers())
+end
+
+local function getExpectedHiderCount(): number
+	local playerCount = #Players:GetPlayers()
+	local expectedPlayerHiders = math.min(playerCount, MAX_HIDERS)
+	local hiderNpcTarget = if adminNpcPopulation
+		then adminNpcPopulation.Hiders
+		else getAutomaticHiderNpcTargetForPlayerCount(playerCount)
+	local availableNpcHiderSlots = math.max(0, MAX_HIDERS - expectedPlayerHiders)
+	return math.clamp(
+		expectedPlayerHiders + math.min(hiderNpcTarget, availableNpcHiderSlots),
+		0,
+		MAX_HIDERS
+	)
+end
+
 local function updateRoleCounts()
 	local hiderCount, seekerCount = getRoleCounts()
+	local npcHiderCount, npcSeekerCount = getNpcRoleCounts()
+	local totalRoundHiders = math.min(MAX_HIDERS, hiderCount + caughtHiderCount)
+	local expectedHiderCount = math.max(getExpectedHiderCount(), totalRoundHiders)
+	roundState:SetAttribute("ExpectedHiderCount", expectedHiderCount)
 	roundState:SetAttribute("HiderCount", hiderCount)
 	roundState:SetAttribute("CaughtHiderCount", caughtHiderCount)
 	roundState:SetAttribute("SeekerCount", seekerCount)
-	roundState:SetAttribute("NpcCount", getManagedNpcCount())
+	roundState:SetAttribute("NpcCount", npcHiderCount + npcSeekerCount)
+	roundState:SetAttribute("NpcHiderCount", npcHiderCount)
+	roundState:SetAttribute("NpcSeekerCount", npcSeekerCount)
+
+	local phase = roundState:GetAttribute("Phase")
+	local debugState = `{tostring(phase)}|{expectedHiderCount}|{hiderCount}|{caughtHiderCount}|{npcHiderCount}|{npcSeekerCount}`
+	if debugState ~= lastRoundTopDebugState then
+		lastRoundTopDebugState = debugState
+		print(
+			`[RoundTopState] Phase={tostring(phase)} `
+				.. `ExpectedHiderCount={expectedHiderCount} `
+				.. `HiderCount={hiderCount} `
+				.. `CaughtHiderCount={caughtHiderCount} `
+				.. `NpcHiderCount={npcHiderCount} `
+				.. `NpcSeekerCount={npcSeekerCount}`
+		)
+	end
 end
 
 local function recordCaughtHider()
@@ -883,48 +946,148 @@ local function shufflePlayers(players: {Player})
 	end
 end
 
-local function applyNpcColor(npc: Model, colorIndex: number)
-	local colors = RoundConfig.NPC.COLORS
-	local color = colors[((colorIndex - 1) % #colors) + 1]
-	for _, descendant in ipairs(npc:GetDescendants()) do
-		if descendant:IsA("BasePart")
-			and descendant.Name ~= "HumanoidRootPart"
-			and descendant.Transparency < 1 then
-			descendant.Color = color
-		end
+local function templateHasRequiredCharacterParts(template: Model): boolean
+	local humanoid = template:FindFirstChildOfClass("Humanoid")
+	local rootPart = template:FindFirstChild("HumanoidRootPart")
+	return humanoid ~= nil and rootPart ~= nil and rootPart:IsA("BasePart")
+end
+
+local function getStarterPackTemplate(skinId: string): Model?
+	local characters = ServerStorage:FindFirstChild(SkinCaseConfig.CHARACTERS_FOLDER_NAME)
+	local starterPack = characters and characters:FindFirstChild(SkinCaseConfig.STARTER_PACK_FOLDER_NAME)
+	local template = starterPack and starterPack:FindFirstChild(skinId)
+	return if template and template:IsA("Model") then template else nil
+end
+
+applyEquippedPlayerSkin = function(player: Player): boolean
+	local role = player:GetAttribute("RoundRole")
+	local characterRole = if type(role) == "string" then role else ROLE_SPECTATOR
+	if characterRole == ROLE_SEEKER then
+		return false
 	end
 
-	local highlight = Instance.new("Highlight")
-	highlight.Name = "NpcColorHighlight"
-	highlight.FillColor = color
-	highlight.FillTransparency = 0.82
-	highlight.OutlineColor = color
-	highlight.OutlineTransparency = 0.15
-	highlight.DepthMode = Enum.HighlightDepthMode.Occluded
-	highlight.Parent = npc
+	local skinId = CurrencyService.GetEquippedSkin(player)
+	if type(skinId) ~= "string" or skinId == "" then
+		return false
+	end
+
+	local template = getStarterPackTemplate(skinId)
+	if not template or not templateHasRequiredCharacterParts(template) then
+		if not missingPlayerSkinWarned[skinId] then
+			missingPlayerSkinWarned[skinId] = true
+			warn(
+				`RoundManager: equipped skin template ServerStorage.`
+					.. `{SkinCaseConfig.CHARACTERS_FOLDER_NAME}.`
+					.. `{SkinCaseConfig.STARTER_PACK_FOLDER_NAME}.{skinId} is invalid`
+			)
+		end
+		return false
+	end
+	missingPlayerSkinWarned[skinId] = nil
+
+	local oldCharacter = player.Character
+	if oldCharacter
+		and oldCharacter:GetAttribute(PLAYER_SKIN_CHARACTER_ATTRIBUTE) == true
+		and oldCharacter:GetAttribute(PLAYER_SKIN_ID_ATTRIBUTE) == skinId then
+		oldCharacter:SetAttribute("RoundRole", characterRole)
+		oldCharacter:SetAttribute(
+			ROUND_CAUGHT_ATTRIBUTE,
+			if player:GetAttribute(ROUND_CAUGHT_ATTRIBUTE) == true then true else nil
+		)
+		return true
+	end
+
+	local oldPivot = if oldCharacter then oldCharacter:GetPivot() else nil
+	local oldArchivable = template.Archivable
+	template.Archivable = true
+	local clone = template:Clone()
+	template.Archivable = oldArchivable
+
+	clone.Name = player.Name
+	clone:SetAttribute(PLAYER_SKIN_CHARACTER_ATTRIBUTE, true)
+	clone:SetAttribute(PLAYER_SKIN_ID_ATTRIBUTE, skinId)
+	clone:SetAttribute("RoundRole", characterRole)
+	clone:SetAttribute(
+		ROUND_CAUGHT_ATTRIBUTE,
+		if player:GetAttribute(ROUND_CAUGHT_ATTRIBUTE) == true then true else nil
+	)
+
+	local humanoid = clone:FindFirstChildOfClass("Humanoid")
+	local rootPart = clone:FindFirstChild("HumanoidRootPart")
+	assert(humanoid and rootPart and rootPart:IsA("BasePart"))
+	humanoid.DisplayName = player.DisplayName
+	if humanoid.MaxHealth <= 0 then
+		humanoid.MaxHealth = 100
+	end
+	humanoid.Health = humanoid.MaxHealth
+
+	for _, descendant in ipairs(clone:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.Anchored = false
+		end
+	end
+	if oldPivot then
+		clone:PivotTo(oldPivot)
+	end
+
+	clone.Parent = Workspace
+	player.Character = clone
+	pcall(function()
+		rootPart:SetNetworkOwner(player)
+	end)
+	if oldCharacter and oldCharacter.Parent and oldCharacter ~= clone then
+		oldCharacter:Destroy()
+	end
+	return true
+end
+
+resetPlayerSkinCharacter = function(player: Player): boolean
+	local character = player.Character
+	if not character or character:GetAttribute(PLAYER_SKIN_CHARACTER_ATTRIBUTE) ~= true then
+		return false
+	end
+	player:LoadCharacter()
+	return true
+end
+
+local function getRandomHiderNpcTemplate(): (Model?, string)
+	local characters = ServerStorage:FindFirstChild(CHARACTERS_CONTAINER_NAME)
+	local starterPack = characters and characters:FindFirstChild(HIDER_STARTER_PACK_NAME)
+	local templatePath = `ServerStorage.{CHARACTERS_CONTAINER_NAME}.{HIDER_STARTER_PACK_NAME}`
+	if not starterPack then
+		return nil, `{templatePath} must contain hider character Models`
+	end
+
+	local templates: {Model} = {}
+	for _, child in ipairs(starterPack:GetChildren()) do
+		if child:IsA("Model") and templateHasRequiredCharacterParts(child) then
+			table.insert(templates, child)
+		end
+	end
+	if #templates == 0 then
+		return nil, `{templatePath} needs at least one Model with Humanoid and HumanoidRootPart`
+	end
+
+	local template = templates[random:NextInteger(1, #templates)]
+	return template, template:GetFullName()
 end
 
 local function getValidatedNpcTemplate(role: string): (Model?, string)
-	local isHunter = role == ROLE_SEEKER
-	local templateContainer: Instance = if isHunter then ServerStorage else StarterPlayer
-	local templateName = if isHunter then HUNTER_CHARACTER_NAME else STARTER_CHARACTER_NAME
-	local templatePath = if isHunter
-		then `ServerStorage.{HUNTER_CHARACTER_NAME}`
-		else `StarterPlayer.{STARTER_CHARACTER_NAME}`
-	local template = templateContainer:FindFirstChild(templateName)
+	if role == ROLE_HIDER then
+		return getRandomHiderNpcTemplate()
+	end
+
+	local templatePath = `ServerStorage.{HUNTER_CHARACTER_NAME}`
+	local template = ServerStorage:FindFirstChild(HUNTER_CHARACTER_NAME)
 	if not template or not template:IsA("Model") then
 		return nil, `{templatePath} must be a Model`
 	end
-	local humanoid = template:FindFirstChildOfClass("Humanoid")
-	local rootPart = template:FindFirstChild("HumanoidRootPart")
-	if not humanoid or not rootPart or not rootPart:IsA("BasePart") then
+	if not templateHasRequiredCharacterParts(template) then
 		return nil, `{templatePath} needs Humanoid and HumanoidRootPart`
 	end
-	if isHunter then
-		local baseBody = template:FindFirstChild("BaseBody")
-		if not baseBody or not baseBody:IsA("BasePart") then
-			return nil, `{templatePath} needs a BasePart named BaseBody`
-		end
+	local baseBody = template:FindFirstChild("BaseBody")
+	if not baseBody or not baseBody:IsA("BasePart") then
+		return nil, `{templatePath} needs a BasePart named BaseBody`
 	end
 	return template, templatePath
 end
@@ -1030,9 +1193,6 @@ local function spawnNpc(role: string): boolean
 	local rootToPivot = rootPart.CFrame:ToObjectSpace(npc:GetPivot())
 	local destinationRoot = getSpawnRootCFrame(arenaSpawn, spawnSlot, humanoid, rootPart)
 	npc:PivotTo(destinationRoot * rootToPivot)
-	if role == ROLE_HIDER then
-		applyNpcColor(npc, npcSerial)
-	end
 	refreshCharacterRoundState(npc, role)
 	task.spawn(function()
 		RunService.Heartbeat:Wait()
@@ -1322,9 +1482,9 @@ local function assignRoles(): boolean
 end
 
 local function setPhase(phase: string, durationSeconds: number)
-	roundState:SetAttribute("Phase", phase)
 	phaseEndsAt = if durationSeconds > 0 then workspace:GetServerTimeNow() + durationSeconds else 0
 	roundState:SetAttribute("EndsAt", phaseEndsAt)
+	roundState:SetAttribute("Phase", phase)
 	refreshAllCharacterRoundStates()
 	HiderEvidenceService.SetPhase(phase)
 	HiderService.SetPhase(phase)
@@ -1482,6 +1642,12 @@ local function setupPlayer(player: Player)
 			character:WaitForChild("HumanoidRootPart", 10)
 			character:WaitForChild("Humanoid", 10)
 			if player.Character == character then
+				local role = player:GetAttribute("RoundRole")
+				if role ~= ROLE_SEEKER
+					and applyEquippedPlayerSkin(player)
+					and player.Character ~= character then
+					return
+				end
 				applyPlayerRoleScale(player)
 				relocatePlayerForCurrentState(player)
 				refreshPlayerRoundState(player)
@@ -1500,6 +1666,22 @@ local function setupPlayer(player: Player)
 					player.Team = nil
 					player.Neutral = true
 				end
+				if role == ROLE_SEEKER then
+					resetPlayerSkinCharacter(player)
+				else
+					applyEquippedPlayerSkin(player)
+				end
+				applyPlayerRoleScale(player)
+				relocatePlayerForCurrentState(player)
+				refreshPlayerRoundState(player)
+			end
+		end)
+	end)
+	player:GetAttributeChangedSignal("EquippedSkin"):Connect(function()
+		task.defer(function()
+			if player.Parent == Players
+				and player:GetAttribute("RoundRole") ~= ROLE_SEEKER
+				and applyEquippedPlayerSkin(player) then
 				applyPlayerRoleScale(player)
 				relocatePlayerForCurrentState(player)
 				refreshPlayerRoundState(player)
@@ -1767,7 +1949,7 @@ RoundControl.Register(function(action: string, arguments: {[string]: any}): (boo
 		local applied, data, problem = applyAdminNpcPopulation(hiderTarget, seekerTarget)
 		if not applied then
 			local message = if problem == "INVALID_HIDER_TEMPLATE"
-				then "The Hider NPC template is invalid."
+				then "ServerStorage.Characters.StarterPack needs at least one valid Hider character."
 				elseif problem == "INVALID_SEEKER_TEMPLATE"
 					then "ServerStorage.HunterCharacter is invalid."
 					else "The exact NPC population could not be applied."
@@ -1856,7 +2038,7 @@ RoundControl.Register(function(action: string, arguments: {[string]: any}): (boo
 			local applied, data, problem = applyAdminNpcPopulation(hiderTarget, seekerTarget)
 			if not applied then
 				local message = if problem == "INVALID_HIDER_TEMPLATE"
-					then "The Hider NPC template is invalid."
+					then "ServerStorage.Characters.StarterPack needs at least one valid Hider character."
 					elseif problem == "INVALID_SEEKER_TEMPLATE"
 						then "ServerStorage.HunterCharacter is invalid."
 						else `The exact population allows at most {MAX_ACTIVE_NPCS} managed NPCs.`

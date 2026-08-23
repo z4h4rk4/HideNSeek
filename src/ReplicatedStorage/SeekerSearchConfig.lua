@@ -7,7 +7,7 @@ return table.freeze({
 	SEARCH_RADIUS = 3,
 	FORWARD_RADIUS_BONUS = 3,
 	FORWARD_RAY_FRACTION = 1 / 4,
-	MAX_VERTICAL_DIFFERENCE = 2,
+	MAX_VERTICAL_DIFFERENCE = 1,
 	LINE_OF_SIGHT_HEIGHT = 1.5,
 	SERVER_SCAN_INTERVAL = 0.1,
 	-- Vision is separate from the short-range capture field above. Being seen

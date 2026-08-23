@@ -1,16 +1,5 @@
 --!strict
 
-local npcColors = table.freeze({
-	Color3.fromRGB(255, 99, 107),
-	Color3.fromRGB(70, 205, 255),
-	Color3.fromRGB(183, 112, 255),
-	Color3.fromRGB(116, 232, 123),
-	Color3.fromRGB(255, 205, 75),
-	Color3.fromRGB(79, 126, 255),
-	Color3.fromRGB(255, 120, 211),
-	Color3.fromRGB(255, 145, 61),
-})
-
 return table.freeze({
 	STARTING_DURATION_SECONDS = 20,
 	ROUND_DURATION_SECONDS = 60,
@@ -54,6 +43,5 @@ return table.freeze({
 			[1] = 5,
 			[2] = 3,
 		}),
-		COLORS = npcColors,
 	}),
 })
